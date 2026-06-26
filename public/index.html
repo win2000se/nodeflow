@@ -1738,7 +1738,7 @@ function runMediaOp(n){
   if(n._mediaSrc!==src){                                   // src changed → recreate element
     if(n._mediaEl && !n._isVid && n._mediaEl.parentNode) n._mediaEl.parentNode.removeChild(n._mediaEl);
     n._mediaSrc=src; n._mediaEl=null; n._mediaReady=false;
-    const isVid=/\.(mp4|webm|ogg|mov)$/i.test(src);
+    const isVid=/\.(mp4|webm|ogg|mov|gif|webp)$/i.test(src);  // gif/webp use video element — Safari won't animate them via canvas drawImage on img
     if(isVid){
       const v=document.createElement('video');
       v.src=src; v.loop=true; v.muted=true; v.autoplay=true; v.setAttribute('playsinline','');
