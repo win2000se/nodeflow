@@ -1732,32 +1732,81 @@ function runCanvasOp(n){
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 }
 
+const HAS_IMAGE_DECODER = (typeof ImageDecoder !== 'undefined');
+
+// tear down any media resources held by a node (img element, video, decoded frames)
+function disposeMedia(n){
+  if(n._mediaEl && !n._isVid && n._mediaEl.parentNode) n._mediaEl.parentNode.removeChild(n._mediaEl);
+  if(n._animFrames){ for(const f of n._animFrames){ try{ f.image.close(); }catch(e){} } }
+  if(n._dec){ try{ n._dec.close(); }catch(e){} }
+  n._mediaEl=null; n._animFrames=null; n._dec=null;
+}
+
+// decode every frame of an animated GIF/WebP up front via the WebCodecs ImageDecoder API.
+// drawImage on an <img> only ever yields the first frame in Chromium for WebP, so we drive
+// frame selection ourselves from the engine clock instead of relying on the browser to paint it.
+async function setupAnimDecoder(n, src){
+  const token = n._mediaSrc;                               // bail if src changes mid-decode
+  const resp = await fetch(src);
+  const buf  = await resp.arrayBuffer();
+  if(n._mediaSrc!==token) return;
+  const type = resp.headers.get('content-type') ||
+               (/\.gif$/i.test(src)?'image/gif':'image/webp');
+  const dec  = new ImageDecoder({ data: buf, type });
+  n._dec = dec;
+  await dec.tracks.ready;
+  await dec.completed;                                     // frameCount is reliable once fully buffered
+  if(n._mediaSrc!==token){ disposeMedia(n); return; }
+  const track = dec.tracks.selectedTrack;
+  const count = Math.max(1, track.frameCount||1);
+  const frames=[]; let total=0;
+  for(let i=0;i<count;i++){
+    const r = await dec.decode({ frameIndex:i });
+    if(n._mediaSrc!==token){ disposeMedia(n); return; }
+    const dur = r.image.duration || 100000;               // microseconds; default 100ms when unspecified
+    frames.push({ image:r.image, dur }); total += dur;
+  }
+  n._animFrames = frames;
+  n._animTotal  = total || 1;
+  n._mediaReady = true;
+}
+
 function runMediaOp(n){
   const src=n.params.src||'';
   if(!src) return;                                          // no file selected — texture stays black
-  if(n._mediaSrc!==src){                                   // src changed → recreate element
-    if(n._mediaEl && !n._isVid && n._mediaEl.parentNode) n._mediaEl.parentNode.removeChild(n._mediaEl);
-    n._mediaSrc=src; n._mediaEl=null; n._mediaReady=false;
-    const isVid=/\.(mp4|webm|ogg|mov)$/i.test(src);  // gif/webp are image formats — use img element so browser drives animation
+  if(n._mediaSrc!==src){                                   // src changed → recreate decoder/element
+    disposeMedia(n);
+    n._mediaSrc=src; n._mediaReady=false; n._isVid=false;
+    const isVid=/\.(mp4|webm|ogg|mov)$/i.test(src);
+    const isAnim=/\.(gif|webp)$/i.test(src);
     if(isVid){
       const v=document.createElement('video');
       v.src=src; v.loop=true; v.muted=true; v.autoplay=true; v.setAttribute('playsinline','');
       v.oncanplay=()=>{ n._mediaReady=true; }; n._mediaEl=v; n._isVid=true;
       v.play().catch(()=>{});
-    } else {                                               // image, GIF, or animated WebP
+    } else if(isAnim && HAS_IMAGE_DECODER){               // GIF / animated WebP — decode frames ourselves
+      setupAnimDecoder(n, src).catch(()=>{ disposeMedia(n); });
+    } else {                                               // static image, or animated fallback
       const img=new Image(); img.crossOrigin='anonymous';
       img.style.cssText='position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;pointer-events:none';
-      document.body.appendChild(img);   // must be in DOM for browser to drive GIF/WebP animation
+      document.body.appendChild(img);
       img.onload=()=>{ n._mediaReady=true; };
-      img.src=src; n._mediaEl=img; n._isVid=false;
+      img.src=src; n._mediaEl=img;
     }
   }
-  if(!n._mediaEl||!n._mediaReady) return;                  // still loading
+  if(!n._mediaReady) return;                               // still loading / decoding
   if(!n._mc){ n._mc=document.createElement('canvas'); n._mx=n._mc.getContext('2d'); }
   if(n._mc.width!==RW||n._mc.height!==RH){ n._mc.width=RW; n._mc.height=RH; }
   const bright=pval(n,'bright'), sat=pval(n,'sat');
   n._mx.filter=(bright!==1||sat!==1)?`brightness(${bright.toFixed(2)}) saturate(${sat.toFixed(2)})`:'none';
-  try{ n._mx.drawImage(n._mediaEl,0,0,RW,RH); }catch(e){ return; }  // drawImage on animated GIF captures current frame
+  let frame=n._mediaEl;
+  if(n._animFrames){                                       // pick frame for current time in the loop
+    const elapsed=((time*1e6)%n._animTotal+n._animTotal)%n._animTotal;  // microseconds, wrapped
+    let acc=0; frame=n._animFrames[0].image;
+    for(const f of n._animFrames){ acc+=f.dur; if(elapsed<acc){ frame=f.image; break; } }
+  }
+  if(!frame) return;
+  try{ n._mx.drawImage(frame,0,0,RW,RH); }catch(e){ return; }
   gl.bindTexture(gl.TEXTURE_2D,n._t.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,n._mc);
