@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NODEFLOW — animated decode test</title>
+<style>
+  body{margin:0;background:#0c0d11;color:#cdd4df;font:13px ui-monospace,Menlo,Consolas,monospace;padding:16px}
+  h2{color:#36d6c0;margin:18px 0 6px;font-size:13px}
+  pre{background:#13151b;border:1px solid #252a35;border-radius:6px;padding:10px;white-space:pre-wrap;line-height:1.5}
+  canvas{background:#000;border:1px solid #252a35;border-radius:6px;image-rendering:pixelated;width:200px;height:200px}
+  .row{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  .ok{color:#5fe08a} .bad{color:#ff6b6b} .dim{color:#6c7686}
+</style>
+</head>
+<body>
+<h2>Environment</h2>
+<pre id="env"></pre>
+<div id="out"></div>
+
+<script>
+const out = document.getElementById('out');
+const log = (el, s, cls='') => { const d=document.createElement('div'); if(cls)d.className=cls; d.textContent=s; el.appendChild(d); };
+
+document.getElementById('env').innerHTML =
+  'ImageDecoder available: <b class="'+(typeof ImageDecoder!=='undefined'?'ok">YES':'bad">NO — that is the problem')+'</b>\n'+
+  'VideoFrame available:   <b class="'+(typeof VideoFrame!=='undefined'?'ok">YES':'bad">NO')+'</b>\n'+
+  'User agent: '+navigator.userAgent;
+
+async function testFile(src){
+  const sec = document.createElement('div');
+  sec.innerHTML = '<h2>'+src+'</h2>';
+  out.appendChild(sec);
+  const info = document.createElement('pre'); sec.appendChild(info);
+  const row = document.createElement('div'); row.className='row'; sec.appendChild(row);
+  const cv = document.createElement('canvas'); cv.width=200; cv.height=200; row.appendChild(cv);
+  const cx = cv.getContext('2d');
+
+  try{
+    if(typeof ImageDecoder==='undefined'){ log(info,'ImageDecoder not supported in this browser','bad'); return; }
+    const resp = await fetch(src);
+    const buf  = await resp.arrayBuffer();
+    const type = resp.headers.get('content-type') || (/\.gif$/i.test(src)?'image/gif':'image/webp');
+    log(info,'fetched '+buf.byteLength+' bytes, content-type: '+type);
+
+    const dec = new ImageDecoder({ data: buf, type });
+    await dec.tracks.ready;
+    await dec.completed;
+    const track = dec.tracks.selectedTrack;
+    const count = track.frameCount;
+    log(info,'track.frameCount: '+count, count>1?'ok':'bad');
+    log(info, count>1 ? '→ multiple frames decoded, this IS animatable' : '→ only ONE frame — decoder sees it as static', count>1?'ok':'bad');
+
+    const frames=[]; let total=0;
+    for(let i=0;i<count;i++){
+      const r = await dec.decode({ frameIndex:i });
+      const dur = r.image.duration || 100000;
+      frames.push({ image:r.image, dur }); total += dur;
+      log(info, '  frame '+i+': '+r.image.displayWidth+'x'+r.image.displayHeight+'  duration='+(dur/1000).toFixed(0)+'ms', 'dim');
+    }
+    log(info,'total loop: '+(total/1000).toFixed(0)+'ms','dim');
+
+    // animate it
+    const t0 = performance.now();
+    (function draw(){
+      const elapsed = ((performance.now()-t0)*1000) % total;
+      let acc=0, frame=frames[0].image;
+      for(const f of frames){ acc+=f.dur; if(elapsed<acc){ frame=f.image; break; } }
+      cx.clearRect(0,0,200,200);
+      try{ cx.drawImage(frame,0,0,200,200); }catch(e){ log(info,'drawImage(VideoFrame) FAILED: '+e.message,'bad'); return; }
+      requestAnimationFrame(draw);
+    })();
+    log(info,'animating on canvas → '+(count>1?'should be moving':'static (single frame)'), count>1?'ok':'dim');
+  }catch(e){
+    log(info,'ERROR: '+e.name+': '+e.message,'bad');
+  }
+}
+
+(async ()=>{
+  let files=[];
+  try{ files = await (await fetch('/api/uploads')).json(); }catch(e){}
+  const webp = files.find(f=>/\.webp$/i.test(f.name));
+  const gif  = files.find(f=>/\.gif$/i.test(f.name));
+  if(webp) await testFile(webp.url);
+  if(gif)  await testFile(gif.url);
+  if(!webp && !gif) log(out,'No webp/gif found in /api/uploads','bad');
+})();
+</script>
+</body>
+</html>
