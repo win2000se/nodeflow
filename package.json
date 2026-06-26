@@ -1,0 +1,17 @@
+{
+  "name": "nodeflow-server",
+  "version": "1.0.0",
+  "description": "NODEFLOW — node-based WebGL2 visual synth, served with a SQLite patch library",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2"
+  }
+}
