@@ -1,9 +1,12 @@
 # NODEFLOW server — Express + SQLite, serves the WebGL2 visual synth frontend
 FROM node:20-bookworm-slim
 
-# build tools for the native better-sqlite3 module
+# build tools for the native better-sqlite3 module, plus media conversion:
+#   ffmpeg      — encodes gif → mp4 (h264) for the <video> playback path
+#   imagemagick — decodes animated webp → gif (ffmpeg cannot read animated webp)
+#   webp        — libwebp tooling backing imagemagick's webp delegate
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make g++ \
+      python3 make g++ ffmpeg imagemagick webp \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -1,8 +1,12 @@
 import express from 'express';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
+
+const pexec = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8080;
@@ -33,14 +37,57 @@ const uploadsDir = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
-app.post('/api/uploads', (req, res) => {
+// Animated GIF/WebP don't play reliably as textures: Brave blocks the ImageDecoder
+// API, and drawImage on an <img> only ever yields frame 0 for WebP in Chromium.
+// So we transcode animated uploads to h264 MP4, which the frontend's <video> path
+// plays correctly on both Brave and iPhone Safari. (MP4 has no alpha — transparency
+// becomes a solid background; it's the only format that plays everywhere on the target
+// devices.) ffmpeg can't decode animated WebP, so ImageMagick demuxes it to GIF first.
+async function transcodeAnimated(dest) {
+  const ext = path.extname(dest).toLowerCase();
+  let isAnim = false;
+  if (ext === '.webp') {
+    isAnim = fs.readFileSync(dest).includes(Buffer.from('ANIM'));   // RIFF animation chunk
+  } else if (ext === '.gif') {
+    try {
+      const { stdout } = await pexec('identify', ['-format', '%n\n', dest]);
+      isAnim = parseInt(stdout, 10) > 1;
+    } catch (e) { isAnim = false; }
+  }
+  if (!isAnim) return null;
+
+  const mp4 = dest.replace(/\.(webp|gif)$/i, '') + '.mp4';
+  let gifSrc = dest, tmpGif = null;
+  if (ext === '.webp') {                       // ffmpeg can't read animated webp → demux to gif
+    tmpGif = dest + '.tmp.gif';
+    await pexec('convert', [dest, tmpGif]);
+    gifSrc = tmpGif;
+  }
+  try {
+    await pexec('ffmpeg', ['-y', '-loglevel', 'error', '-i', gifSrc,
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',   // h264 needs even dimensions
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', mp4],
+      { maxBuffer: 16 * 1024 * 1024 });
+  } finally {
+    if (tmpGif) { try { fs.unlinkSync(tmpGif); } catch (e) {} }
+  }
+  try { fs.unlinkSync(dest); } catch (e) {}     // drop the original; only the mp4 is served
+  return mp4;
+}
+
+app.post('/api/uploads', async (req, res) => {
   const { filename = 'upload', data } = req.body || {};
   if (!data) return res.status(400).json({ error: 'data required' });
   const safe = (filename || 'file').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
   const dest = path.join(uploadsDir, Date.now() + '_' + safe);
   try {
     fs.writeFileSync(dest, Buffer.from(data, 'base64'));
-    res.json({ url: '/uploads/' + path.basename(dest) });
+    let served = dest;
+    try {
+      const mp4 = await transcodeAnimated(dest);   // animated gif/webp → mp4
+      if (mp4) served = mp4;
+    } catch (e) { console.error('transcode failed, serving original:', e.message); }
+    res.json({ url: '/uploads/' + path.basename(served) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
