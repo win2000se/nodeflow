@@ -231,7 +231,25 @@ if(!gl){ document.body.innerHTML='<p style="padding:40px;font-family:monospace">
 gl.getExtension('EXT_color_buffer_float');
 
 const DPR = Math.min(window.devicePixelRatio||1, 2);
-let RW=960, RH=540;                       // internal render resolution
+let RW=960, RH=540;                       // ACTIVE internal render resolution
+// The graph renders cheaper while editing (previewRes) and at full quality for the final
+// output (outRes) — perform mode, PNG export and video recording. fpsCap (0 = uncapped)
+// throttles the render loop to smooth out vsync/judder.
+let outRes=[960,540], previewRes=[640,360], fpsCap=0;
+try{ const sv=JSON.parse(localStorage.getItem('nf_render')||'{}');
+  if(Array.isArray(sv.out)&&sv.out.length===2) outRes=sv.out.map(Number);
+  if(Array.isArray(sv.preview)&&sv.preview.length===2) previewRes=sv.preview.map(Number);
+  if(typeof sv.fps==='number') fpsCap=sv.fps;
+}catch(e){}
+function saveRenderCfg(){ try{ localStorage.setItem('nf_render',JSON.stringify({out:outRes,preview:previewRes,fps:fpsCap})); }catch(e){} }
+function wantHiRes(){ return document.body.classList.contains('perf') || !!mediaRec; }   // full quality contexts
+function syncRenderRes(){ const r=wantHiRes()?outRes:previewRes;
+  if(RW!==r[0]||RH!==r[1]){ RW=r[0]; RH=r[1]; reallocTargets(); if(mResEl) mResEl.textContent=RW+'×'+RH; dirty=true; } }
+function setOutputRes(val){ const a=String(val).split('x').map(Number);
+  if(a.length===2&&a[0]&&a[1]){ outRes=a; if(bRes) bRes.value=a[0]+'x'+a[1]; saveRenderCfg(); syncRenderRes(); } }
+function setPreviewRes(val){ const a=String(val).split('x').map(Number);
+  if(a.length===2&&a[0]&&a[1]){ previewRes=a; saveRenderCfg(); syncRenderRes(); } }
+function setFpsCap(n){ fpsCap=+n||0; saveRenderCfg(); }
 
 // fullscreen triangle
 const triBuf = gl.createBuffer();
@@ -2437,7 +2455,7 @@ window.addEventListener('keydown',(e)=>{
 //----------------------------------------------------------------- save / load / export
 let recClean=false, mediaRec=null, recChunks=[];
 function serialize(){
-  return JSON.stringify({ v:1, res:[RW,RH], tscale:+timeScale.toFixed(3), view:{x:Math.round(view.x),y:Math.round(view.y),z:+view.z.toFixed(4)},
+  return JSON.stringify({ v:1, res:[outRes[0],outRes[1]], tscale:+timeScale.toFixed(3), view:{x:Math.round(view.x),y:Math.round(view.y),z:+view.z.toFixed(4)},
     nodes:nodes.map(n=>({id:n.id,op:n.op,x:Math.round(n.x),y:Math.round(n.y),params:n.params,mods:n.mods||[]})),
     conns:conns.map(c=>({from:c.from,to:c.to,port:c.port||0})) }, null, 1);
 }
@@ -2445,7 +2463,7 @@ function deserialize(str){
   let d; try{ d=JSON.parse(str); }catch(e){ alert('Could not parse patch JSON.'); return false; }
   if(!d || !Array.isArray(d.nodes)){ alert('That doesn’t look like a NODEFLOW patch.'); return false; }
   clearGraph();
-  if(Array.isArray(d.res)){ RW=d.res[0]; RH=d.res[1]; reallocTargets(); bRes.value=RW+'x'+RH; mResEl.textContent=RW+'×'+RH; }
+  if(Array.isArray(d.res)){ setOutputRes(d.res[0]+'x'+d.res[1]); }
   timeScale = (typeof d.tscale==='number') ? d.tscale : 1;
   let maxId=0;
   d.nodes.forEach(nd=>{ if(!OPS[nd.op]) return;
@@ -2612,9 +2630,11 @@ async function pickExistingMedia(node, paramKey, cb){
 }).catch(()=>{}); })();
 
 function snapshotPNG(){
+  const restore = !wantHiRes() && (RW!==outRes[0]||RH!==outRes[1]);   // export at full output res
+  if(restore){ RW=outRes[0]; RH=outRes[1]; reallocTargets(); }
   renderGraph();
   const outNode=nodes.find(n=>n.op==='output');
-  if(!outNode||!outNode._t){ alert('Add an Output node first, then export.'); return; }
+  if(!outNode||!outNode._t){ if(restore) syncRenderRes(); alert('Add an Output node first, then export.'); return; }
   gl.bindFramebuffer(gl.FRAMEBUFFER, outNode._t.fbo);
   const px=new Uint8Array(RW*RH*4);
   gl.readPixels(0,0,RW,RH,gl.RGBA,gl.UNSIGNED_BYTE,px);
@@ -2624,6 +2644,7 @@ function snapshotPNG(){
   for(let y=0;y<RH;y++){ const sy=(RH-1-y)*RW*4, dy=y*RW*4; for(let x=0;x<RW*4;x++) img.data[dy+x]=px[sy+x]; }
   c2.putImageData(img,0,0);
   cv.toBlob(b=>{ if(b) downloadBlob(b,'nodeflow-'+Date.now()+'.png'); }, 'image/png');
+  if(restore) syncRenderRes();
 }
 function recSupported(){ return !!(window.MediaRecorder && glc.captureStream); }
 function toggleRecord(){
@@ -2639,8 +2660,9 @@ function toggleRecord(){
   mediaRec.ondataavailable=e=>{ if(e.data&&e.data.size) recChunks.push(e.data); };
   mediaRec.onstop=()=>{ const mt=mediaRec.mimeType||'video/webm'; const blob=new Blob(recChunks,{type:mt});
     downloadBlob(blob,'nodeflow-'+Date.now()+(mt.indexOf('mp4')>=0?'.mp4':'.webm'));
-    mediaRec=null; recClean=false; bFile.classList.remove('on'); bFile.textContent='⤓ File'; };
+    mediaRec=null; recClean=false; syncRenderRes(); bFile.classList.remove('on'); bFile.textContent='⤓ File'; };
   mediaRec.start();
+  syncRenderRes();   // record at full output resolution
   bFile.classList.add('on'); bFile.textContent='■ Stop rec';
 }
 
@@ -2671,9 +2693,18 @@ function buildFileMenu(){
   item('🖼  Save image (PNG)', snapshotPNG);
   item(mediaRec?'■  Stop recording':(recSupported()?'⏺  Record video':'⏺  Record (unsupported)'), toggleRecord);
   fileMenu.append(el('div','sep'));
-  const qh=el('div','it','🎚  Quality — lower = faster'); qh.style.cssText='opacity:.55;cursor:default;font-size:11px'; fileMenu.append(qh);
+  const hdr=t=>{ const h=el('div','it',t); h.style.cssText='opacity:.55;cursor:default;font-size:11px'; fileMenu.append(h); };
+  hdr('🖥  Output quality (final)');
   [['Low · 640×360','640x360'],['Medium · 960×540','960x540'],['High · 1280×720','1280x720'],['Full · 1920×1080','1920x1080']].forEach(([label,val])=>{
-    item(((RW+'x'+RH)===val?'✓  ':'    ')+label, ()=>setResolution(val));
+    item((outRes.join('x')===val?'✓  ':'    ')+label, ()=>setOutputRes(val));
+  });
+  hdr('🔍  Preview quality (editor)');
+  [['Tiny · 480×270','480x270'],['Low · 640×360','640x360'],['Medium · 960×540','960x540'],['High · 1280×720','1280x720']].forEach(([label,val])=>{
+    item((previewRes.join('x')===val?'✓  ':'    ')+label, ()=>setPreviewRes(val));
+  });
+  hdr('🎬  FPS cap (final output)');
+  [['Uncapped',0],['120 fps',120],['60 fps',60],['30 fps',30],['24 fps',24]].forEach(([label,val])=>{
+    item((fpsCap===val?'✓  ':'    ')+label, ()=>setFpsCap(val));
   });
   fileMenu.append(el('div','sep'));
   item('✨  Generate by feel…', openFeelModal);
@@ -2748,13 +2779,11 @@ document.getElementById('fDone').addEventListener('click',closeFeelModal);
   sl.addEventListener('input',apply); apply();
 })();
 bAudio.addEventListener('click',()=>{ if(audioOn) disableAudio(); else enableAudio(); });
-function setResolution(val){ const a=String(val).split('x').map(Number); if(a.length!==2||!a[0]||!a[1]) return;
-  RW=a[0]; RH=a[1]; reallocTargets(); if(bRes) bRes.value=RW+'x'+RH; mResEl.textContent=RW+'×'+RH; dirty=true; }
-bRes.addEventListener('change',()=>setResolution(bRes.value));
+bRes.addEventListener('change',()=>setOutputRes(bRes.value));   // toolbar dropdown = final output quality
 
-function enterPerf(){ document.body.classList.add('perf');
+function enterPerf(){ document.body.classList.add('perf'); syncRenderRes();   // full quality for the live output
   const el=document.documentElement; if(el.requestFullscreen) el.requestFullscreen().catch(()=>{}); }
-function exitPerf(){ document.body.classList.remove('perf');
+function exitPerf(){ document.body.classList.remove('perf'); syncRenderRes();  // back to cheap preview res
   if(document.fullscreenElement&&document.exitFullscreen) document.exitFullscreen().catch(()=>{}); }
 bPerf.addEventListener('click',()=>{ if(document.body.classList.contains('perf')) exitPerf(); else enterPerf(); });
 // tap the OUTPUT preview to jump into fullscreen perform mode
@@ -3487,7 +3516,12 @@ function randomizeParams(){
   renderPanel(); dirty=true;
   if(!playing) togglePlay();
 }
+let lastRenderT=0;
 function frame(now){
+  requestAnimationFrame(frame);
+  // fps cap: skip this animation frame if the cap interval hasn't elapsed (smooths vsync judder)
+  if(fpsCap>0 && lastRenderT && (now-lastRenderT) < (1000/fpsCap - 0.6)) return;
+  lastRenderT=now;
   const dt=Math.min(0.05,(now-last)/1000); last=now; simDt=dt;
   if(playing) time+=dt;
   if(xf.active){ xf.t += dt/Math.max(0.05,xf.dur); if(xf.t>=1){ xf.t=1; xf.active=false; } dirty=true; }
@@ -3497,14 +3531,15 @@ function frame(now){
   drawGL(); drawBG(); drawFG();
   frames++; fpsT+=dt;
   if(fpsT>=0.5){ fps=Math.round(frames/fpsT); fpsEl.textContent=fps+' fps'; frames=0; fpsT=0; }
-  requestAnimationFrame(frame);
 }
 
 window.addEventListener('resize',()=>{ dirty=true; });
 
 //----------------------------------------------------------------- boot
-mResEl.textContent=RW+'×'+RH;
 buildDefault();
+if(bRes) bRes.value=outRes[0]+'x'+outRes[1];
+syncRenderRes();                          // start the editor at preview resolution
+mResEl.textContent=RW+'×'+RH;
 renderPanel();
 resize();
 fitView();
