@@ -135,7 +135,12 @@
   body.perf #perfHint{display:block;animation:fade 3s forwards}
   @keyframes fade{0%,70%{opacity:1}100%{opacity:0}}
   .help{position:fixed;left:8px;bottom:8px;z-index:4;font-family:var(--mono);font-size:10px;color:var(--dimmer);
-    line-height:1.7;pointer-events:none;max-width:260px}
+    line-height:1.7;pointer-events:none;max-width:260px;transition:opacity .8s}
+  body.perf .help{opacity:0}
+  #monitor{cursor:pointer}
+  #sideResize{position:absolute;left:-4px;top:0;bottom:0;width:10px;cursor:ew-resize;z-index:7}
+  #sideResize:hover{background:linear-gradient(90deg,transparent,rgba(91,140,255,.25))}
+  @media(max-width:760px){ #sideResize{display:none} }
   @media(max-width:760px){
     #side{top:auto;left:0;right:0;bottom:0;width:auto;height:46%;flex-direction:row;flex-wrap:nowrap;
       background:linear-gradient(#10121a,#0c0d11);border-top:1px solid var(--line)}
@@ -1871,8 +1876,13 @@ function runMediaOp(n){
     for(const f of n._gifFrames){ acc+=f.delayMs; if(elapsed<acc){ frame=f.canvas; break; } }
   }
   if(!frame) return;
-  n._mx.clearRect(0,0,RW,RH);                               // clear so transparent gif pixels stay transparent
-  try{ n._mx.drawImage(frame,0,0,RW,RH); }catch(e){ return; }
+  const sw=frame.naturalWidth||frame.videoWidth||frame.width||RW;    // source intrinsic size
+  const sh=frame.naturalHeight||frame.videoHeight||frame.height||RH;
+  const ar=sw/sh, car=RW/RH; let dw,dh;
+  if(ar>car){ dw=RW; dh=Math.round(RW/ar); } else { dh=RH; dw=Math.round(RH*ar); }   // contain-fit, keep aspect
+  const dx=Math.round((RW-dw)/2), dy=Math.round((RH-dh)/2);
+  n._mx.clearRect(0,0,RW,RH);                               // transparent letterbox — no stretch, alpha preserved
+  try{ n._mx.drawImage(frame,dx,dy,dw,dh); }catch(e){ return; }
   gl.bindTexture(gl.TEXTURE_2D,n._t.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,n._mc);
@@ -2575,7 +2585,7 @@ async function pickExistingMedia(node, paramKey, cb){
   x.onclick=close; ov.onclick=(e)=>{ if(e.target===ov) close(); };
   files.slice().reverse().forEach(f=>{
     const cell=document.createElement('button');
-    cell.className='btn'; cell.style.cssText='display:flex;flex-direction:column;gap:4px;padding:6px;height:auto;align-items:stretch';
+    cell.className='btn'; cell.style.cssText='position:relative;display:flex;flex-direction:column;gap:4px;padding:6px;height:auto;align-items:stretch';
     const isVid=/\.(mp4|webm|ogg|mov)$/i.test(f.name);
     let media;
     if(isVid){ media=document.createElement('video'); media.src=f.url; media.muted=true; media.loop=true; media.autoplay=true; media.setAttribute('playsinline',''); media.play&&media.play().catch(()=>{}); }
@@ -2583,7 +2593,13 @@ async function pickExistingMedia(node, paramKey, cb){
     media.style.cssText='width:100%;height:74px;object-fit:contain;background:#0a0b0f;border-radius:5px';
     const nm=document.createElement('div'); nm.textContent=f.name.replace(/^\d+_/,'');
     nm.style.cssText='font-size:9px;color:#9aa3b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-    cell.append(media,nm);
+    const del=document.createElement('span'); del.textContent='✕'; del.title='Delete this upload';
+    del.style.cssText='position:absolute;top:3px;right:3px;width:19px;height:19px;line-height:18px;text-align:center;border-radius:10px;background:rgba(20,10,12,.85);color:#ff8a8a;font-size:11px;z-index:2';
+    del.onclick=async(ev)=>{ ev.stopPropagation();
+      if(!confirm('Delete '+f.name.replace(/^\d+_/,'')+'? Patches using it will break.')) return;
+      try{ await fetch('/api/uploads/'+encodeURIComponent(f.name),{method:'DELETE'}); cell.remove(); }
+      catch(e){ alert('Delete failed: '+e.message); } };
+    cell.append(media,nm,del);
     cell.onclick=()=>{ node.params[paramKey]=f.url; close(); if(cb) cb(); };
     grid.appendChild(cell);
   });
@@ -2654,6 +2670,11 @@ function buildFileMenu(){
   fileMenu.append(el('div','sep'));
   item('🖼  Save image (PNG)', snapshotPNG);
   item(mediaRec?'■  Stop recording':(recSupported()?'⏺  Record video':'⏺  Record (unsupported)'), toggleRecord);
+  fileMenu.append(el('div','sep'));
+  const qh=el('div','it','🎚  Quality — lower = faster'); qh.style.cssText='opacity:.55;cursor:default;font-size:11px'; fileMenu.append(qh);
+  [['Low · 640×360','640x360'],['Medium · 960×540','960x540'],['High · 1280×720','1280x720'],['Full · 1920×1080','1920x1080']].forEach(([label,val])=>{
+    item(((RW+'x'+RH)===val?'✓  ':'    ')+label, ()=>setResolution(val));
+  });
   fileMenu.append(el('div','sep'));
   item('✨  Generate by feel…', openFeelModal);
   item('🎛  Limit operators…', openOpsModal);
@@ -2727,19 +2748,37 @@ document.getElementById('fDone').addEventListener('click',closeFeelModal);
   sl.addEventListener('input',apply); apply();
 })();
 bAudio.addEventListener('click',()=>{ if(audioOn) disableAudio(); else enableAudio(); });
-bRes.addEventListener('change',()=>{ const a=bRes.value.split('x').map(Number);
-  RW=a[0]; RH=a[1]; reallocTargets(); mResEl.textContent=RW+'×'+RH; dirty=true; });
+function setResolution(val){ const a=String(val).split('x').map(Number); if(a.length!==2||!a[0]||!a[1]) return;
+  RW=a[0]; RH=a[1]; reallocTargets(); if(bRes) bRes.value=RW+'x'+RH; mResEl.textContent=RW+'×'+RH; dirty=true; }
+bRes.addEventListener('change',()=>setResolution(bRes.value));
 
 function enterPerf(){ document.body.classList.add('perf');
   const el=document.documentElement; if(el.requestFullscreen) el.requestFullscreen().catch(()=>{}); }
 function exitPerf(){ document.body.classList.remove('perf');
   if(document.fullscreenElement&&document.exitFullscreen) document.exitFullscreen().catch(()=>{}); }
 bPerf.addEventListener('click',()=>{ if(document.body.classList.contains('perf')) exitPerf(); else enterPerf(); });
+// tap the OUTPUT preview to jump into fullscreen perform mode
+monitor.addEventListener('click',()=>{ if(!document.body.classList.contains('perf')) enterPerf(); });
+monitor.title='Tap for fullscreen perform';
 (function(){ const pe=document.getElementById('perfExit');
   const ex=e=>{ if(document.body.classList.contains('perf')){ e.preventDefault(); exitPerf(); } };
   pe.addEventListener('pointerdown',ex);
   pe.addEventListener('touchend',ex,{passive:false});
   pe.addEventListener('click',ex);
+})();
+// drag the left border of the side panel to resize it (desktop only)
+(function(){
+  const handle=document.createElement('div'); handle.id='sideResize'; side.appendChild(handle);
+  let sideW=parseInt(localStorage.getItem('nf_sideW')||'300',10); if(!(sideW>=220&&sideW<=640)) sideW=300;
+  const apply=()=>{ side.style.width = (window.innerWidth>760) ? sideW+'px' : ''; };
+  apply(); window.addEventListener('resize',apply);
+  handle.addEventListener('pointerdown',e=>{
+    if(window.innerWidth<=760) return;
+    e.preventDefault(); try{ handle.setPointerCapture(e.pointerId); }catch(_){}
+    const move=ev=>{ sideW=Math.max(220,Math.min(640, window.innerWidth-ev.clientX)); side.style.width=sideW+'px'; dirty=true; };
+    const up=()=>{ localStorage.setItem('nf_sideW',String(sideW)); window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); };
+    window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
+  });
 })();
 document.addEventListener('fullscreenchange',()=>{ if(!document.fullscreenElement) document.body.classList.remove('perf'); });
 

@@ -65,9 +65,10 @@ Constants: `TAU`, `PI`
 - Quality floor: 1.6 — keeps retrying until a candidate clears it
 
 ### Rise operator
-- 2-input compositor: port 0 = background, port 1 = content
-- Ball-arc physics: ease-out rise, apex hang (40-60% of cycle), ease-in fall
-- Params: ease, speed, offset (time offset for staggering multiple instances), startY, topY, xpos, scale, sway, depth
+- 2-input compositor: **port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background**
+- Directional thrown-arc: content is launched in a chosen direction (forward/back/left/right relative to camera), arcs up, then falls; depth drives perspective size (forward recedes/shrinks, back rushes toward camera/grows)
+- Content alpha is respected — transparent areas show the background through
+- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (height), steep (fall steepness), xpos/startY (launch point), scale (base size), persp (perspective strength)
 - Stack multiple Rise nodes to layer several floating images at different timings (use offset param)
 
 ### VJ deck bank
