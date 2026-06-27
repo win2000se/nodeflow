@@ -1732,61 +1732,135 @@ function runCanvasOp(n){
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 }
 
-const HAS_IMAGE_DECODER = (typeof ImageDecoder !== 'undefined');
-
-// tear down any media resources held by a node (img element, video, decoded frames)
-function disposeMedia(n){
-  if(n._mediaEl && !n._isVid && n._mediaEl.parentNode) n._mediaEl.parentNode.removeChild(n._mediaEl);
-  if(n._animFrames){ for(const f of n._animFrames){ try{ f.image.close(); }catch(e){} } }
-  if(n._dec){ try{ n._dec.close(); }catch(e){} }
-  n._mediaEl=null; n._animFrames=null; n._dec=null;
+// ---- self-contained animated-GIF decoder → fully-composited RGBA frames ----
+// Brave blocks ImageDecoder and Chromium's drawImage(<img>) only yields frame 0 for
+// animated formats, so we decode GIFs ourselves. This preserves the GIF's transparency
+// (which a video-conversion path cannot — no alpha video codec plays on both Brave & iOS).
+// Verified pixel-perfect (incl. alpha) against ImageMagick -coalesce.
+function gifDeinterlace(h){
+  const order=new Array(h); let n=0;
+  for(let i=0;i<h;i+=8) order[n++]=i;
+  for(let i=4;i<h;i+=8) order[n++]=i;
+  for(let i=2;i<h;i+=4) order[n++]=i;
+  for(let i=1;i<h;i+=2) order[n++]=i;
+  return order;
+}
+function gifLZW(minCodeSize, data, pixelCount){
+  const out=new Uint8Array(pixelCount);
+  const clearCode=1<<minCodeSize, eoiCode=clearCode+1;
+  let codeSize=minCodeSize+1, dict=[];
+  const reset=()=>{ dict=[]; for(let i=0;i<clearCode;i++) dict[i]=[i]; dict[clearCode]=[]; dict[eoiCode]=null; };
+  reset();
+  let bitPos=0, oi=0, prev=null;
+  const readCode=()=>{ let code=0; for(let i=0;i<codeSize;i++){ const byte=bitPos>>3, bit=bitPos&7;
+    if(byte>=data.length) return eoiCode; code|=((data[byte]>>bit)&1)<<i; bitPos++; } return code; };
+  let code;
+  while((code=readCode())!==eoiCode){
+    if(code===clearCode){ reset(); codeSize=minCodeSize+1; prev=null; continue; }
+    let entry;
+    if(code<dict.length && dict[code]) entry=dict[code];
+    else if(prev) entry=prev.concat(prev[0]);
+    else break;
+    for(let i=0;i<entry.length;i++){ if(oi<pixelCount) out[oi++]=entry[i]; }
+    if(prev){ dict.push(prev.concat(entry[0])); if(dict.length===(1<<codeSize) && codeSize<12) codeSize++; }
+    prev=entry;
+    if(oi>=pixelCount) break;
+  }
+  return out;
+}
+function decodeGIF(u8){
+  let p=0;
+  const rd=()=>u8[p++], rd16=()=>{ const v=u8[p]|(u8[p+1]<<8); p+=2; return v; };
+  if(String.fromCharCode(u8[0],u8[1],u8[2])!=='GIF') throw new Error('not a GIF');
+  p=6;
+  const width=rd16(), height=rd16();
+  const packed=rd(); const gctFlag=packed&0x80, gctSize=2<<(packed&7);
+  p+=2; // bg color index + aspect ratio
+  let gct=null; if(gctFlag){ gct=u8.subarray(p,p+gctSize*3); p+=gctSize*3; }
+  const frames=[]; const canvas=new Uint8ClampedArray(width*height*4); let prevCanvas=null;
+  let gceDelay=0, gceTransparent=-1, gceDisposal=0;
+  const readSub=()=>{ const chunks=[]; let len; while((len=rd())!==0){ chunks.push(u8.subarray(p,p+len)); p+=len; }
+    let total=0; for(const c of chunks) total+=c.length; const out=new Uint8Array(total); let o=0;
+    for(const c of chunks){ out.set(c,o); o+=c.length; } return out; };
+  const skipSub=()=>{ let len; while((len=rd())!==0) p+=len; };
+  while(p<u8.length){
+    const block=rd();
+    if(block===0x3B) break;
+    if(block===0x21){ const label=rd();
+      if(label===0xF9){ rd(); const fp=rd(); gceDisposal=(fp>>2)&7; gceDelay=rd16()*10; const tIdx=rd();
+        gceTransparent=(fp&1)?tIdx:-1; rd(); }
+      else skipSub();
+      continue;
+    }
+    if(block!==0x2C) continue;
+    const ix=rd16(), iy=rd16(), iw=rd16(), ih=rd16();
+    const ipacked=rd(); const lctFlag=ipacked&0x80, interlace=ipacked&0x40, lctSize=2<<(ipacked&7);
+    let ct=gct; if(lctFlag){ ct=u8.subarray(p,p+lctSize*3); p+=lctSize*3; }
+    const minCode=rd(); const indices=gifLZW(minCode, readSub(), iw*ih);
+    if(gceDisposal===3) prevCanvas=canvas.slice();
+    const order=interlace?gifDeinterlace(ih):null;
+    let si=0;
+    for(let row=0;row<ih;row++){
+      const dy=iy+(interlace?order[row]:row);
+      if(dy<0||dy>=height){ si+=iw; continue; }
+      for(let col=0;col<iw;col++){
+        const idx=indices[si++]; const dx=ix+col;
+        if(dx<0||dx>=width) continue;
+        if(idx===gceTransparent) continue;
+        const ci=idx*3, d=(dy*width+dx)*4;
+        canvas[d]=ct[ci]; canvas[d+1]=ct[ci+1]; canvas[d+2]=ct[ci+2]; canvas[d+3]=255;
+      }
+    }
+    frames.push({ delayMs:gceDelay||100, rgba:canvas.slice() });
+    if(gceDisposal===2){
+      for(let row=0;row<ih;row++){ const dy=iy+row; if(dy<0||dy>=height) continue;
+        for(let col=0;col<iw;col++){ const dx=ix+col; if(dx<0||dx>=width) continue; const d=(dy*width+dx)*4;
+          canvas[d]=0; canvas[d+1]=0; canvas[d+2]=0; canvas[d+3]=0; } }
+    } else if(gceDisposal===3 && prevCanvas){ canvas.set(prevCanvas); }
+    gceDelay=0; gceTransparent=-1; gceDisposal=0;
+  }
+  return { width, height, frames };
 }
 
-// decode every frame of an animated GIF/WebP up front via the WebCodecs ImageDecoder API.
-// drawImage on an <img> only ever yields the first frame in Chromium for WebP, so we drive
-// frame selection ourselves from the engine clock instead of relying on the browser to paint it.
-async function setupAnimDecoder(n, src){
-  const token = n._mediaSrc;                               // bail if src changes mid-decode
-  const resp = await fetch(src);
-  const buf  = await resp.arrayBuffer();
+// tear down any media resources held by a node (img element, video, decoded gif frames)
+function disposeMedia(n){
+  if(n._mediaEl && !n._isVid && n._mediaEl.parentNode) n._mediaEl.parentNode.removeChild(n._mediaEl);
+  n._mediaEl=null; n._gifFrames=null;
+}
+
+// fetch + decode a gif once into per-frame canvases (native size, alpha preserved)
+async function setupGifDecode(n, src){
+  const token=n._mediaSrc;
+  const resp=await fetch(src);
+  const u8=new Uint8Array(await resp.arrayBuffer());
   if(n._mediaSrc!==token) return;
-  const type = resp.headers.get('content-type') ||
-               (/\.gif$/i.test(src)?'image/gif':'image/webp');
-  const dec  = new ImageDecoder({ data: buf, type });
-  n._dec = dec;
-  await dec.tracks.ready;
-  await dec.completed;                                     // frameCount is reliable once fully buffered
-  if(n._mediaSrc!==token){ disposeMedia(n); return; }
-  const track = dec.tracks.selectedTrack;
-  const count = Math.max(1, track.frameCount||1);
-  const frames=[]; let total=0;
-  for(let i=0;i<count;i++){
-    const r = await dec.decode({ frameIndex:i });
-    if(n._mediaSrc!==token){ disposeMedia(n); return; }
-    const dur = r.image.duration || 100000;               // microseconds; default 100ms when unspecified
-    frames.push({ image:r.image, dur }); total += dur;
-  }
-  n._animFrames = frames;
-  n._animTotal  = total || 1;
-  n._mediaReady = true;
+  let g; try{ g=decodeGIF(u8); }catch(e){ return; }
+  if(n._mediaSrc!==token || !g.frames.length) return;
+  n._gifFrames=g.frames.map(f=>{
+    const c=document.createElement('canvas'); c.width=g.width; c.height=g.height;
+    c.getContext('2d').putImageData(new ImageData(f.rgba, g.width, g.height), 0, 0);
+    return { canvas:c, delayMs:f.delayMs };
+  });
+  n._gifTotal=n._gifFrames.reduce((s,f)=>s+f.delayMs,0)||100;
+  n._mediaReady=true;
 }
 
 function runMediaOp(n){
   const src=n.params.src||'';
   if(!src) return;                                          // no file selected — texture stays black
-  if(n._mediaSrc!==src){                                   // src changed → recreate decoder/element
+  if(n._mediaSrc!==src){                                   // src changed → recreate element / decode
     disposeMedia(n);
     n._mediaSrc=src; n._mediaReady=false; n._isVid=false;
     const isVid=/\.(mp4|webm|ogg|mov)$/i.test(src);
-    const isAnim=/\.(gif|webp)$/i.test(src);
+    const isGif=/\.gif$/i.test(src);
     if(isVid){
       const v=document.createElement('video');
       v.src=src; v.loop=true; v.muted=true; v.autoplay=true; v.setAttribute('playsinline','');
       v.oncanplay=()=>{ n._mediaReady=true; }; n._mediaEl=v; n._isVid=true;
       v.play().catch(()=>{});
-    } else if(isAnim && HAS_IMAGE_DECODER){               // GIF / animated WebP — decode frames ourselves
-      setupAnimDecoder(n, src).catch(()=>{ disposeMedia(n); });
-    } else {                                               // static image, or animated fallback
+    } else if(isGif){                                       // animated gif — decode ourselves (keeps transparency)
+      setupGifDecode(n, src).catch(()=>{});
+    } else {                                               // static image (png/jpg/svg/static webp)
       const img=new Image(); img.crossOrigin='anonymous';
       img.style.cssText='position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;pointer-events:none';
       document.body.appendChild(img);
@@ -1800,12 +1874,13 @@ function runMediaOp(n){
   const bright=pval(n,'bright'), sat=pval(n,'sat');
   n._mx.filter=(bright!==1||sat!==1)?`brightness(${bright.toFixed(2)}) saturate(${sat.toFixed(2)})`:'none';
   let frame=n._mediaEl;
-  if(n._animFrames){                                       // pick frame for current time in the loop
-    const elapsed=((time*1e6)%n._animTotal+n._animTotal)%n._animTotal;  // microseconds, wrapped
-    let acc=0; frame=n._animFrames[0].image;
-    for(const f of n._animFrames){ acc+=f.dur; if(elapsed<acc){ frame=f.image; break; } }
+  if(n._gifFrames){                                         // pick gif frame for current time in the loop
+    const elapsed=((time*1000)%n._gifTotal+n._gifTotal)%n._gifTotal;   // ms, wrapped
+    let acc=0; frame=n._gifFrames[0].canvas;
+    for(const f of n._gifFrames){ acc+=f.delayMs; if(elapsed<acc){ frame=f.canvas; break; } }
   }
   if(!frame) return;
+  n._mx.clearRect(0,0,RW,RH);                               // clear so transparent gif pixels stay transparent
   try{ n._mx.drawImage(frame,0,0,RW,RH); }catch(e){ return; }
   gl.bindTexture(gl.TEXTURE_2D,n._t.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);

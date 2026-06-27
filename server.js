@@ -37,39 +37,26 @@ const uploadsDir = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
-// Animated GIF/WebP don't play reliably as textures: Brave blocks the ImageDecoder
-// API, and drawImage on an <img> only ever yields frame 0 for WebP in Chromium.
-// So we transcode animated uploads to h264 MP4, which the frontend's <video> path
-// plays correctly on both Brave and iPhone Safari. (MP4 has no alpha — transparency
-// becomes a solid background; it's the only format that plays everywhere on the target
-// devices.) ffmpeg can't decode animated WebP, so ImageMagick demuxes it to GIF first.
+// Animated WebP can't be played as a texture in Brave (ImageDecoder is blocked; Chromium's
+// drawImage(<img>) only yields frame 0), so we transcode it to h264 MP4 for the frontend's
+// <video> path, which plays on both Brave and iPhone Safari. ffmpeg can't decode animated
+// WebP, so ImageMagick demuxes it to GIF first. (MP4 has no alpha — animated WebP loses
+// transparency. Animated GIFs are NOT transcoded: the frontend decodes them itself, which
+// keeps their transparency, since no alpha-capable video codec plays on both target devices.)
 async function transcodeAnimated(dest) {
-  const ext = path.extname(dest).toLowerCase();
-  let isAnim = false;
-  if (ext === '.webp') {
-    isAnim = fs.readFileSync(dest).includes(Buffer.from('ANIM'));   // RIFF animation chunk
-  } else if (ext === '.gif') {
-    try {
-      const { stdout } = await pexec('identify', ['-format', '%n\n', dest]);
-      isAnim = parseInt(stdout, 10) > 1;
-    } catch (e) { isAnim = false; }
-  }
-  if (!isAnim) return null;
+  if (path.extname(dest).toLowerCase() !== '.webp') return null;   // gifs served raw, decoded client-side
+  if (!fs.readFileSync(dest).includes(Buffer.from('ANIM'))) return null;  // static webp → serve as image
 
-  const mp4 = dest.replace(/\.(webp|gif)$/i, '') + '.mp4';
-  let gifSrc = dest, tmpGif = null;
-  if (ext === '.webp') {                       // ffmpeg can't read animated webp → demux to gif
-    tmpGif = dest + '.tmp.gif';
-    await pexec('convert', [dest, tmpGif]);
-    gifSrc = tmpGif;
-  }
+  const mp4 = dest.replace(/\.webp$/i, '') + '.mp4';
+  const tmpGif = dest + '.tmp.gif';
+  await pexec('convert', [dest, tmpGif]);       // ffmpeg can't read animated webp → demux to gif
   try {
-    await pexec('ffmpeg', ['-y', '-loglevel', 'error', '-i', gifSrc,
+    await pexec('ffmpeg', ['-y', '-loglevel', 'error', '-i', tmpGif,
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',   // h264 needs even dimensions
       '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', mp4],
       { maxBuffer: 16 * 1024 * 1024 });
   } finally {
-    if (tmpGif) { try { fs.unlinkSync(tmpGif); } catch (e) {} }
+    try { fs.unlinkSync(tmpGif); } catch (e) {}
   }
   try { fs.unlinkSync(dest); } catch (e) {}     // drop the original; only the mp4 is served
   return mp4;
