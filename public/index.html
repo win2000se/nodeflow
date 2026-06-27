@@ -1236,53 +1236,44 @@ vec4 render(vec2 uv){
       P.f('bright','brightness',0,2,1,0.01), P.f('sat','saturation',0,2,1,0.01) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
+  // port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background behind it
   rise:{ cat:'comp', ins:2, params:[
-      P.sel('ease','motion',['float','spring','wave','drift'],0),
+      P.sel('dir','throw dir',['forward','back','left','right'],0),
       P.f('speed','speed',0.03,1.5,0.2,0.01),
       P.f('offset','time offset',0.0,1.0,0.0,0.01),
-      P.f('startY','start Y',0.5,2.5,1.45,0.01),
-      P.f('topY','peak Y',0.0,1.0,0.22,0.01),
-      P.f('xpos','x center',0.0,1.0,0.5,0.01),
-      P.f('scale','scale',0.05,2.0,0.45,0.01),
-      P.f('sway','sway',0.0,0.5,0.04,0.005),
-      P.f('depth','z depth',0.0,0.6,0.12,0.005) ],
+      P.f('throw','throw dist',0.0,1.5,0.6,0.01),
+      P.f('arc','arc height',0.0,1.2,0.6,0.01),
+      P.f('steep','fall steepness',0.0,1.0,0.5,0.01),
+      P.f('xpos','launch X',0.0,1.0,0.5,0.01),
+      P.f('startY','launch Y',0.3,1.4,1.05,0.01),
+      P.f('scale','size',0.05,2.0,0.5,0.01),
+      P.f('persp','perspective',0.0,1.0,0.5,0.01) ],
     body:`vec4 render(vec2 uv){
       float spd=max(0.001,u_speed);
       float t=fract(uTime*spd*0.13+u_offset);
-      float phase;
-      if(u_ease<0.5){
-        // FLOAT: ball-arc — deceleration rising, hang at peak, gravity on the way down
-        if(t<0.40){
-          float r=t/0.40;
-          phase=r*(2.0-r);                        // ease-out quad: fast launch, bleeding off speed
-        } else if(t<0.60){
-          float f=(t-0.40)/0.20;
-          phase=1.0-0.018*sin(f*PI);             // apex hang — barely moves, just a gentle bob
-        } else {
-          float f=(t-0.60)/0.40;
-          phase=1.0-f*f*(3.0-2.0*f);            // ease-in smoothstep: gravity pulls it back slowly then faster
-        }
-      } else if(u_ease<1.5){
-        // SPRING: overshoots peak, settles like elastic
-        float s=t*TAU;
-        phase=clamp(1.0-exp(-s*0.65)*cos(s*2.1),0.0,1.0);
-      } else if(u_ease<2.5){
-        // WAVE: smooth symmetric sine
-        phase=0.5-0.5*cos(t*TAU);
-      } else {
-        // DRIFT: buoyant, spends most of the cycle near peak (like floating underwater)
-        phase=pow(0.5-0.5*cos(t*TAU),0.35);
-      }
-      float cy=mix(u_startY,u_topY,phase);
-      // sway: dual-frequency so it feels organic, not mechanical
-      float sw=u_sway*(sin(uTime*spd*TAU*0.7)*0.6+sin(uTime*spd*TAU*1.9+1.1)*0.4);
-      float cx=u_xpos+sw;
-      // depth: content breathes larger as it rises (z perspective — coming toward viewer)
-      float ds=1.0+u_depth*phase;
-      float s=max(0.02,u_scale)*ds;
-      vec2 p=(uv-vec2(cx,cy))/s+0.5;
-      if(p.x<0.0||p.x>1.0||p.y<0.0||p.y>1.0) return texture(uTex0,uv);
-      return vec4(texture(uTex1,p).rgb,1.0);
+      // throw direction in world space: x = screen-lateral, z = depth into the scene
+      vec2 dirv;
+      if(u_dir<0.5)      dirv=vec2(0.0, 1.0);   // forward — recedes into the screen
+      else if(u_dir<1.5) dirv=vec2(0.0,-1.0);   // back — rushes toward the camera
+      else if(u_dir<2.5) dirv=vec2(-1.0,0.0);   // left
+      else               dirv=vec2(1.0, 0.0);   // right
+      float wx=dirv.x*u_throw*t;                          // lateral travel (constant velocity)
+      float wz=max(0.15, 1.0 + dirv.y*u_throw*t);         // depth: 1=launch plane, grows/shrinks with throw
+      // projectile height — thrown up then falls; steep biases the peak earlier so the fall is sharper
+      float peak=mix(0.55,0.30,u_steep);
+      float h;
+      if(t<peak){ float r=t/peak; h=u_arc*r*(2.0-r); }    // ease-out climb
+      else { float f=(t-peak)/(1.0-peak); h=u_arc*(1.0-f*f); } // accelerating fall
+      // perspective divide: lateral, height and size all scale by depth
+      float pz=mix(1.0, wz, u_persp);
+      float sc=max(0.02,u_scale)/pz;
+      float cx=u_xpos + wx/pz;
+      float cy=u_startY - h/pz;                           // height lifts it up the screen
+      vec3 bg=texture(uTex1,uv).rgb;
+      vec2 p=(uv-vec2(cx,cy))/sc+0.5;
+      if(p.x<0.0||p.x>1.0||p.y<0.0||p.y>1.0) return vec4(bg,1.0);
+      vec4 c=texture(uTex0,p);                            // content; respect its alpha so transparency shows bg
+      return vec4(mix(bg,c.rgb,c.a),1.0);
     }` },
 
   output:{ cat:'out', ins:1, params:[],
@@ -2154,6 +2145,9 @@ function renderPanel(){
       const upBtn=el('button','btn acc'); upBtn.textContent=cur?'🔄 Change':'⤒ Upload media';
       upBtn.onclick=()=>mediaUpload(n,p.key,()=>{ dirty=true; renderPanel(); });
       wrap.appendChild(upBtn);
+      if(LIB.on){ const pickBtn=el('button','btn'); pickBtn.textContent='🗂 Browse uploads';
+        pickBtn.onclick=()=>pickExistingMedia(n,p.key,()=>{ dirty=true; renderPanel(); });
+        wrap.appendChild(pickBtn); }
       if(!LIB.on){ const note=el('div'); note.style.cssText='font-size:10px;color:#7c8593'; note.textContent='Needs server connection'; wrap.appendChild(note); }
       row.append(lab,wrap);
     }
@@ -2561,6 +2555,41 @@ async function mediaUpload(node, paramKey, cb){
   input.click();
 }
 
+// pick from already-uploaded media (already transcoded server-side, so they just work)
+async function pickExistingMedia(node, paramKey, cb){
+  if(!LIB.on){ alert('Browsing uploads requires the server.'); return; }
+  let files=[];
+  try{ files=await (await fetch('/api/uploads')).json(); }catch(e){ alert('Could not load uploads.'); return; }
+  if(!files.length){ alert('No uploads yet — use Upload media to add one.'); return; }
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:30;background:rgba(8,9,13,0.82);display:flex;align-items:center;justify-content:center;padding:20px';
+  const box=document.createElement('div');
+  box.style.cssText='background:#13151b;border:1px solid #252a35;border-radius:10px;max-width:560px;width:100%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden';
+  const head=document.createElement('div');
+  head.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #252a35;font-family:var(--mono);font-size:12px;color:#cdd4df';
+  head.innerHTML='<span>Pick an upload</span>';
+  const x=document.createElement('button'); x.textContent='✕'; x.className='btn'; head.appendChild(x);
+  const grid=document.createElement('div');
+  grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;padding:12px;overflow:auto';
+  const close=()=>ov.remove();
+  x.onclick=close; ov.onclick=(e)=>{ if(e.target===ov) close(); };
+  files.slice().reverse().forEach(f=>{
+    const cell=document.createElement('button');
+    cell.className='btn'; cell.style.cssText='display:flex;flex-direction:column;gap:4px;padding:6px;height:auto;align-items:stretch';
+    const isVid=/\.(mp4|webm|ogg|mov)$/i.test(f.name);
+    let media;
+    if(isVid){ media=document.createElement('video'); media.src=f.url; media.muted=true; media.loop=true; media.autoplay=true; media.setAttribute('playsinline',''); media.play&&media.play().catch(()=>{}); }
+    else { media=document.createElement('img'); media.src=f.url; }
+    media.style.cssText='width:100%;height:74px;object-fit:contain;background:#0a0b0f;border-radius:5px';
+    const nm=document.createElement('div'); nm.textContent=f.name.replace(/^\d+_/,'');
+    nm.style.cssText='font-size:9px;color:#9aa3b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    cell.append(media,nm);
+    cell.onclick=()=>{ node.params[paramKey]=f.url; close(); if(cb) cb(); };
+    grid.appendChild(cell);
+  });
+  box.append(head,grid); ov.appendChild(box); document.body.appendChild(ov);
+}
+
 // detect the backend; only show the Library button when it answers
 (function(){ if(typeof fetch!=='function') return; fetch('/api/health').then(r=>r.ok?r.json():Promise.reject()).then(()=>{
   LIB.on=true; const b=document.getElementById('bLib'); if(b){ b.style.display=''; b.addEventListener('click',libOpen); }
@@ -2858,7 +2887,7 @@ const MODT={
   palette:['shift','contrast'], bloom:['threshold','intensity','radius'],
   composite:['mix'], displace:['amount'], feedback:['rot','zoom'], flow:['advect','swirl','scale'],
   modulate:['amount'], tonemap:['exposure'], colorama:['shift','drift'], thresh:['level'],
-  rise:['speed','topY','xpos','sway','depth']
+  rise:['speed','arc','xpos','throw','persp']
 };
 // structural/geometric params read as "pumping" under a periodic LFO — drive them with organic waves instead
 const STRUCT_PARAMS={zoom:1,scale:1,rot:1,decay:1,camDist:1,blob:1,seg:1,advect:1,amount:1,twist:1,offx:1,offy:1,rotStep:1,tiles:1,panx:1,pany:1};
