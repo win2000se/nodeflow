@@ -57,7 +57,7 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
   .card h3{margin:0;padding:9px 12px;font-family:var(--mono);font-size:11px;letter-spacing:.08em;
     color:var(--dim);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;text-transform:uppercase}
-  #monitor{height:178px;border:1px solid var(--line);border-radius:11px;position:relative;
+  #monitor{width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:11px;position:relative;
     background:#000;overflow:hidden;flex:none}
   #monitor .ml{position:absolute;left:9px;top:7px;font-family:var(--mono);font-size:10px;
     letter-spacing:.12em;color:#7fe6c9;text-shadow:0 0 8px rgba(0,0,0,.8);pointer-events:none}
@@ -102,7 +102,7 @@
   #addMenu .it{display:flex;align-items:center;gap:9px;padding:8px;border-radius:7px;cursor:pointer;font-family:var(--mono);font-size:12px}
   #addMenu .it:hover{background:#232936}
   #addMenu .dot{width:9px;height:9px;border-radius:3px;flex:none}
-  #fileMenu{position:fixed;z-index:9;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:6px;display:none;min-width:190px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  #fileMenu{position:fixed;z-index:9;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:6px;display:none;min-width:190px;max-height:calc(100vh - 70px);overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.5)}
   #fileMenu .it{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:7px;cursor:pointer;font-family:var(--mono);font-size:12px}
   #fileMenu .it:hover{background:#232936}
   #fileMenu .sep{height:1px;background:var(--line);margin:5px 2px}
@@ -304,6 +304,9 @@ uniform sampler2D uTex0; uniform sampler2D uTex1; uniform sampler2D uPrev;
 uniform float uTime; uniform vec2 uRes; uniform vec4 uAudio;
 const float TAU=6.2831853;
 const float PI=3.14159265;
+#define ASP (uRes.x/uRes.y)
+// centered, aspect-corrected coords so circles stay round on a widescreen output
+vec2 aspectP(vec2 uv){ return vec2((uv.x-0.5)*ASP, uv.y-0.5); }
 float hash21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
 vec2 hash22(vec2 p){ p=vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))); return fract(sin(p)*43758.5453123); }
 float vnoise(vec2 p){
@@ -397,7 +400,7 @@ const OPS = {
       P.f('size','size',0.02,1.4,0.6), P.f('soft','softness',0.0,0.5,0.02),
       P.col('fill','fill','#e8eef7'), P.col('bg','background','#00000000') ],
     body:`vec4 render(vec2 uv){
-      vec2 p=uv-0.5; float d;
+      vec2 p=aspectP(uv); float d;
       if(u_kind<0.5) d=length(p)-u_size*0.5;
       else if(u_kind<1.5){ vec2 q=abs(p)-u_size*0.5; d=length(max(q,0.0))+min(max(q.x,q.y),0.0); }
       else if(u_kind<2.5) d=abs(length(p)-u_size*0.4)-0.04;
@@ -413,7 +416,7 @@ const OPS = {
       P.f('speed','speed',0,2,0.25), P.sel('mode','mode',['cells','edges','distance'],0),
       P.f('edge','edge width',0.01,0.3,0.08) ],
     body:`vec4 render(vec2 uv){
-      vec2 p=uv*u_scale; vec2 ip=floor(p), fp=fract(p);
+      vec2 p=vec2(uv.x*ASP,uv.y)*u_scale; vec2 ip=floor(p), fp=fract(p);   // aspect-corrected → square cells
       float f1=8.0, f2=8.0; vec2 id1=vec2(0.0);
       for(int y=-1;y<=1;y++){
         for(int x=-1;x<=1;x++){
@@ -628,7 +631,7 @@ vec4 render(vec2 uv){
       P.f('variation','size variation',0,1,0.4), P.f('speed','animation',0,2,0.5),
       P.f('hue','hue',0,1,0.55), P.f('colorvar','hue spread',0,1,0.3), P.bool('cycle','hue cycle',0) ],
     body:`vec4 render(vec2 uv){
-      vec2 g=uv*u_scale; vec2 id=floor(g), f=fract(g)-0.5;
+      vec2 g=vec2(uv.x*ASP,uv.y)*u_scale; vec2 id=floor(g), f=fract(g)-0.5;   // square cells → round shapes
       float rnd=hash21(id);
       vec2 jit=(hash22(id+0.3)-0.5)*u_jitter;
       vec2 p=rot2(f-jit, rnd*TAU + uTime*u_speed*(rnd*2.0-1.0));
@@ -652,7 +655,7 @@ vec4 render(vec2 uv){
       P.f('thick','thickness',0.04,0.45,0.16), P.f('speed','pulse',0,2,0.3),
       P.f('hue','hue',0,1,0.6), P.f('grad','hue gradient',0,1,0.3), P.bool('cycle','hue cycle',0) ],
     body:`vec4 render(vec2 uv){
-      vec2 g=uv*u_scale; vec2 id=floor(g), f=fract(g);
+      vec2 g=vec2(uv.x*ASP,uv.y)*u_scale; vec2 id=floor(g), f=fract(g);   // square tiles → circular arcs
       float flip=step(0.5,hash21(id));
       vec2 p=mix(vec2(1.0-f.x,f.y), f, flip);
       float d;
@@ -685,7 +688,7 @@ vec4 render(vec2 uv){
       for(int i=0;i<8;i++){
         float on=step(float(i)+0.5,u_count); float fi=float(i);
         vec2 c=0.5+0.38*vec2(sin(t*0.7+fi*1.7), cos(t*0.9+fi*2.3));
-        float d=length(uv-c);
+        float d=length((uv-c)*vec2(ASP,1.0));   // aspect-corrected → round blobs
         field += on*(u_radius*u_radius/(d*d+0.0008));
       }
       float m=smoothstep(u_thresh-0.15,u_thresh+0.15,field);
@@ -1052,6 +1055,30 @@ vec4 render(vec2 uv){
       return vec4(clamp(r,0.,1.), max(inp.a,prev.a));
     }` },
 
+  // TIME ECHO — temporal dilator. Feed it a moving input (e.g. shape→rise) and it leaves a
+  // cascade of copies frozen at successively older moments, each shrunk/drifted/tinted — so a
+  // single travelling shape becomes several copies at different points in time and at different sizes.
+  timeecho:{ cat:'fb', ins:1, params:[
+      P.f('size','copy shrink',0.85,1.35,1.14,0.01), P.f('decay','copies / persistence',0.5,0.985,0.86,0.005),
+      P.f('driftx','drift X / copy',-0.08,0.08,0.0,0.002), P.f('drifty','drift Y / copy',-0.08,0.08,0.0,0.002),
+      P.f('spin','spin / copy',-0.3,0.3,0.0,0.005), P.f('hue','hue shift / copy',0,1,0.0,0.01),
+      P.f('cx','focus X',0,1,0.5,0.005), P.f('cy','focus Y',0,1,0.5,0.005),
+      P.sel('blend','combine',['lighten','add','over'],0) ],
+    feedback:true,
+    body:`vec4 render(vec2 uv){
+      vec2 ctr=vec2(u_cx,u_cy);
+      vec2 q=rot2(uv-ctr,-u_spin);
+      vec2 sp=q/max(u_size,0.05)+ctr-vec2(u_driftx,u_drifty);   // each frame shrinks+drifts+spins existing copies
+      vec4 pv=texture(uPrev, clamp(sp,0.0,1.0));
+      vec3 prev=pv.rgb*u_decay;
+      if(u_hue>0.001){ vec3 hs=rgb2hsv(prev); hs.x=fract(hs.x+u_hue*0.12); prev=hsv2rgb(hs); }   // tint older copies
+      vec4 inp=texture(uTex0,uv);
+      vec3 col = (u_blend<0.5) ? max(prev,inp.rgb)
+               : (u_blend<1.5) ? prev+inp.rgb
+               : mix(prev,inp.rgb,inp.a);
+      return vec4(col, max(inp.a, pv.a*u_decay));
+    }` },
+
   flow:{ cat:'fb', ins:1, params:[
       P.f('decay','decay',0.8,1.0,0.97,0.002), P.f('advect','flow amount',0,0.025,0.008,0.0005),
       P.f('scale','field scale',0.5,6,2,0.01), P.f('speed','field speed',0,1,0.15,0.01),
@@ -1182,7 +1209,7 @@ vec4 render(vec2 uv){
       P.f('warp','warp',0,1,0.2,0.01), P.f('speed','morph speed',0,1,0.2,0.01),
       P.col('colorA','plate','#0b0b12ff'), P.col('colorB','sand','#e9dcc0ff') ],
     body:`vec4 render(vec2 uv){
-      vec2 p=uv;
+      vec2 p=vec2((uv.x-0.5)*ASP+0.5, uv.y);   // square plate → undistorted nodal pattern
       p += (vnoise(p*3.0+uTime*0.1)-0.5)*u_warp*0.12;
       float t=uTime*u_speed;
       float m=u_m+sin(t); float n=u_n+cos(t*0.8);
@@ -1280,13 +1307,14 @@ vec4 render(vec2 uv){
       else if(u_dir<1.5) dirv=vec2(0.0,-1.0);   // back — rushes toward the camera
       else if(u_dir<2.5) dirv=vec2(-1.0,0.0);   // left
       else               dirv=vec2(1.0, 0.0);   // right
-      float wx=dirv.x*u_throw*t;                          // lateral travel (constant velocity)
+      float wx=dirv.x*u_throw*t;                          // lateral travel (constant horizontal velocity)
       float wz=max(0.15, 1.0 + dirv.y*u_throw*t);         // depth: 1=launch plane, grows/shrinks with throw
-      // projectile height — thrown up then falls; steep biases the peak earlier so the fall is sharper
-      float peak=mix(0.55,0.30,u_steep);
-      float h;
-      if(t<peak){ float r=t/peak; h=u_arc*r*(2.0-r); }    // ease-out climb
-      else { float f=(t-peak)/(1.0-peak); h=u_arc*(1.0-f*f); } // accelerating fall
+      // true ballistic arc: launched upward under constant gravity. steep = gravity strength,
+      // so the rise decelerates to a hang at the apex and the fall accelerates — like a real throw.
+      float grav=mix(1.2,4.0,u_steep);
+      float v0=sqrt(2.0*grav*max(u_arc,0.0001));           // launch speed that reaches peak height u_arc
+      float tt=t*(2.0*v0/grav);                            // map the whole flight across the loop
+      float h=max(0.0, v0*tt-0.5*grav*tt*tt);              // height above launch; peak u_arc at mid-flight
       // perspective divide: lateral, height and size all scale by depth
       float pz=mix(1.0, wz, u_persp);
       float sc=max(0.02,u_scale)/pz;
@@ -1971,7 +1999,7 @@ function renderGraph(){
 
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
-  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',
+  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',
   feedback:'Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
@@ -2695,7 +2723,7 @@ function buildFileMenu(){
   fileMenu.append(el('div','sep'));
   const hdr=t=>{ const h=el('div','it',t); h.style.cssText='opacity:.55;cursor:default;font-size:11px'; fileMenu.append(h); };
   hdr('🖥  Output quality (final)');
-  [['Low · 640×360','640x360'],['Medium · 960×540','960x540'],['High · 1280×720','1280x720'],['Full · 1920×1080','1920x1080']].forEach(([label,val])=>{
+  [['Low · 640×360','640x360'],['Medium · 960×540','960x540'],['High · 1280×720','1280x720'],['Full · 1920×1080','1920x1080'],['2K · 2560×1440','2560x1440']].forEach(([label,val])=>{
     item((outRes.join('x')===val?'✓  ':'    ')+label, ()=>setOutputRes(val));
   });
   hdr('🔍  Preview quality (editor)');
@@ -2955,7 +2983,8 @@ const MODT={
   palette:['shift','contrast'], bloom:['threshold','intensity','radius'],
   composite:['mix'], displace:['amount'], feedback:['rot','zoom'], flow:['advect','swirl','scale'],
   modulate:['amount'], tonemap:['exposure'], colorama:['shift','drift'], thresh:['level'],
-  rise:['speed','arc','xpos','throw','persp']
+  rise:['speed','arc','xpos','throw','persp'],
+  timeecho:['size','decay','spin','hue']
 };
 // structural/geometric params read as "pumping" under a periodic LFO — drive them with organic waves instead
 const STRUCT_PARAMS={zoom:1,scale:1,rot:1,decay:1,camDist:1,blob:1,seg:1,advect:1,amount:1,twist:1,offx:1,offy:1,rotStep:1,tiles:1,panx:1,pany:1};
