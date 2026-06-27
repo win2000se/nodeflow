@@ -1293,7 +1293,7 @@ vec4 render(vec2 uv){
       P.f('offset','time offset',0.0,1.0,0.0,0.01),
       P.f('throw','throw dist',0.0,1.5,0.6,0.01),
       P.f('arc','arc height',0.0,1.2,0.6,0.01),
-      P.f('steep','fall steepness',0.0,1.0,0.5,0.01),
+      P.f('steep','hang / float',0.0,1.0,0.5,0.01),
       P.f('xpos','launch X',0.0,1.0,0.5,0.01),
       P.f('startY','launch Y',0.3,1.4,1.05,0.01),
       P.f('scale','size',0.05,2.0,0.5,0.01),
@@ -1307,14 +1307,12 @@ vec4 render(vec2 uv){
       else if(u_dir<1.5) dirv=vec2(0.0,-1.0);   // back — rushes toward the camera
       else if(u_dir<2.5) dirv=vec2(-1.0,0.0);   // left
       else               dirv=vec2(1.0, 0.0);   // right
-      float wx=dirv.x*u_throw*t;                          // lateral travel (constant horizontal velocity)
-      float wz=max(0.15, 1.0 + dirv.y*u_throw*t);         // depth: 1=launch plane, grows/shrinks with throw
-      // true ballistic arc: launched upward under constant gravity. steep = gravity strength,
-      // so the rise decelerates to a hang at the apex and the fall accelerates — like a real throw.
-      float grav=mix(1.2,4.0,u_steep);
-      float v0=sqrt(2.0*grav*max(u_arc,0.0001));           // launch speed that reaches peak height u_arc
-      float tt=t*(2.0*v0/grav);                            // map the whole flight across the loop
-      float h=max(0.0, v0*tt-0.5*grav*tt*tt);              // height above launch; peak u_arc at mid-flight
+      // one eased 0→1→0 envelope drives the whole motion. Velocity is zero at the apex AND at the
+      // loop seam, so it floats up and settles back with no hard ceiling bounce and no snap.
+      float s=0.5-0.5*cos(t*TAU);
+      float wx=dirv.x*u_throw*s;                           // gentle drift along the throw dir, out and back
+      float wz=max(0.15, 1.0 + dirv.y*u_throw*s);          // depth drift (recede / approach) and back
+      float h=u_arc*pow(s, mix(1.4,0.45,u_steep));         // floaty rise & fall; steep = buoyant hang at the top
       // perspective divide: lateral, height and size all scale by depth
       float pz=mix(1.0, wz, u_persp);
       float sc=max(0.02,u_scale)/pz;

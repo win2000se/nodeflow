@@ -28,7 +28,7 @@ bash deploy.sh
 - `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media
 - `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
 - `comp` — compositors (2 inputs): composite, displace, lens, modulate, rise
-- `fb` — feedback (1 input, ping-pong): feedback, flow, reaction, life
+- `fb` — feedback (1 input, ping-pong): feedback, flow, reaction, life, timeecho
 - `out` — output (1 input): output
 
 ### Special operator flags
@@ -39,7 +39,10 @@ bash deploy.sh
 ### GLSL helpers available in all shaders
 `hash21`, `hash22`, `vnoise`, `fbm`, `rot2(vec2,float)`, `wrapUV`, `rgb2hsv`, `hsv2rgb`, `blendm`, `sdSphere`, `sdBox`, `sdTorus`, `sdCapsule`, `sdOcta`, `sdCyl`, `smin3`
 
-Constants: `TAU`, `PI`
+Constants: `TAU`, `PI`, `ASP` (= uRes.x/uRes.y)
+
+### Aspect ratio in shaders
+Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed in raw `uv` stretches (circles become ellipses). Aspect-correct any op that draws round/regular geometry: use `aspectP(uv)` (returns centered coords with x×ASP) for centered SDFs, or multiply the x of tiling coords by `ASP` for square cells. 3D ops correct via `sp.x*=uRes.x/uRes.y` in their ray setup. Filters that warp an input image are generally left uncorrected.
 
 ### Adding a new operator
 1. Add entry to `OPS` object with `cat`, `ins`, `params`, `body`
@@ -68,8 +71,14 @@ Constants: `TAU`, `PI`
 - 2-input compositor: **port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background**
 - Directional thrown-arc: content is launched in a chosen direction (forward/back/left/right relative to camera), arcs up, then falls; depth drives perspective size (forward recedes/shrinks, back rushes toward camera/grows)
 - Content alpha is respected — transparent areas show the background through
-- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (height), steep (fall steepness), xpos/startY (launch point), scale (base size), persp (perspective strength)
+- Motion is a true ballistic arc: launched upward under constant gravity, so it decelerates to an apex hang then accelerates on the way down
+- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (gravity strength), xpos/startY (launch point), scale (base size), persp (perspective strength)
 - Stack multiple Rise nodes to layer several floating images at different timings (use offset param)
+
+### Time Echo operator (timeecho)
+- Feedback op (1 input, ping-pong) acting as a temporal dilator: leaves a cascade of copies frozen at successively older moments, each shrunk/drifted/spun/hue-shifted. Feed it a moving input (e.g. shape→rise) to get several copies at different points in time and sizes.
+- Params: size (per-copy shrink), decay (how many copies persist), driftx/drifty, spin, hue (tint per copy), cx/cy (focus), blend (lighten/add/over)
+- Continuous cascade (each copy one frame older). For exact N discrete frozen copies a multi-tap delay-line version would be needed — not yet built.
 
 ### VJ deck bank
 - 8 slots, persisted to localStorage
