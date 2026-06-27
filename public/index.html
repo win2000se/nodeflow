@@ -292,6 +292,20 @@ const blit_aPos = gl.getAttribLocation(blitProg,'aPos');
 const blit_uRect = gl.getUniformLocation(blitProg,'uRect');
 const blit_uTex  = gl.getUniformLocation(blitProg,'uTex0');
 
+// time-echo: draw a texture scaled+offset+faded into the bound FBO (one pass per echo copy)
+const TE_FS = `#version 300 es
+precision highp float; in vec2 vUv; uniform sampler2D uTex; uniform float uScale; uniform vec2 uOff; uniform float uFade;
+out vec4 fragColor;
+void main(){ vec2 p=(vUv-0.5)/max(uScale,0.001)+0.5-uOff;
+  if(p.x<0.0||p.x>1.0||p.y<0.0||p.y>1.0){ fragColor=vec4(0.0); return; }
+  vec4 c=texture(uTex,p); fragColor=vec4(c.rgb*uFade, c.a); }`;
+const teProg = program(VS, TE_FS);
+const te_aPos = gl.getAttribLocation(teProg,'aPos');
+const te_uTex = gl.getUniformLocation(teProg,'uTex');
+const te_uScale = gl.getUniformLocation(teProg,'uScale');
+const te_uOff = gl.getUniformLocation(teProg,'uOff');
+const te_uFade = gl.getUniformLocation(teProg,'uFade');
+
 // shared GLSL header (precision + uniforms + helpers)
 const GLSL_HEADER = `#version 300 es
 #ifdef GL_FRAGMENT_PRECISION_HIGH
@@ -1055,29 +1069,16 @@ vec4 render(vec2 uv){
       return vec4(clamp(r,0.,1.), max(inp.a,prev.a));
     }` },
 
-  // TIME ECHO — temporal dilator. Feed it a moving input (e.g. shape→rise) and it leaves a
-  // cascade of copies frozen at successively older moments, each shrunk/drifted/tinted — so a
-  // single travelling shape becomes several copies at different points in time and at different sizes.
-  timeecho:{ cat:'fb', ins:1, params:[
-      P.f('size','copy shrink',0.85,1.35,1.14,0.01), P.f('decay','copies / persistence',0.5,0.985,0.86,0.005),
-      P.f('driftx','drift X / copy',-0.08,0.08,0.0,0.002), P.f('drifty','drift Y / copy',-0.08,0.08,0.0,0.002),
-      P.f('spin','spin / copy',-0.3,0.3,0.0,0.005), P.f('hue','hue shift / copy',0,1,0.0,0.01),
-      P.f('cx','focus X',0,1,0.5,0.005), P.f('cy','focus Y',0,1,0.5,0.005),
+  // TIME ECHO — true multi-tap temporal dilator (custom render path, not a shader feedback loop).
+  // It keeps a ring of frozen snapshots of the input taken every `spacing` frames, then draws N of
+  // them as discrete copies, each from a distinct moment in the past, shrunk/offset/faded. Feed it a
+  // moving input (e.g. shape→rise) to get several real copies frozen at different times AND sizes.
+  timeecho:{ cat:'fb', ins:1, timeecho:true, params:[
+      P.f('taps','copies',1,7,4,1), P.f('spacing','time gap (frames)',1,40,10,1),
+      P.f('size','size step / copy',0.5,1.05,0.82,0.01), P.f('fade','fade / copy',0.3,1.0,0.86,0.01),
+      P.f('offx','offset X / copy',-0.25,0.25,0.0,0.005), P.f('offy','offset Y / copy',-0.25,0.25,0.0,0.005),
       P.sel('blend','combine',['lighten','add','over'],0) ],
-    feedback:true,
-    body:`vec4 render(vec2 uv){
-      vec2 ctr=vec2(u_cx,u_cy);
-      vec2 q=rot2(uv-ctr,-u_spin);
-      vec2 sp=q/max(u_size,0.05)+ctr-vec2(u_driftx,u_drifty);   // each frame shrinks+drifts+spins existing copies
-      vec4 pv=texture(uPrev, clamp(sp,0.0,1.0));
-      vec3 prev=pv.rgb*u_decay;
-      if(u_hue>0.001){ vec3 hs=rgb2hsv(prev); hs.x=fract(hs.x+u_hue*0.12); prev=hsv2rgb(hs); }   // tint older copies
-      vec4 inp=texture(uTex0,uv);
-      vec3 col = (u_blend<0.5) ? max(prev,inp.rgb)
-               : (u_blend<1.5) ? prev+inp.rgb
-               : mix(prev,inp.rgb,inp.a);
-      return vec4(col, max(inp.a, pv.a*u_decay));
-    }` },
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },   // body unused — handled by runTimeEcho
 
   flow:{ cat:'fb', ins:1, params:[
       P.f('decay','decay',0.8,1.0,0.97,0.002), P.f('advect','flow amount',0,0.025,0.008,0.0005),
@@ -1309,10 +1310,13 @@ vec4 render(vec2 uv){
       else               dirv=vec2(1.0, 0.0);   // right
       // one eased 0→1→0 envelope drives the whole motion. Velocity is zero at the apex AND at the
       // loop seam, so it floats up and settles back with no hard ceiling bounce and no snap.
-      float s=0.5-0.5*cos(t*TAU);
-      float wx=dirv.x*u_throw*s;                           // gentle drift along the throw dir, out and back
-      float wz=max(0.15, 1.0 + dirv.y*u_throw*s);          // depth drift (recede / approach) and back
-      float h=u_arc*pow(s, mix(1.4,0.45,u_steep));         // floaty rise & fall; steep = buoyant hang at the top
+      // true projectile arc: TRAVELS across the range (linear horizontal) while height traces a
+      // parabola — launches, arcs over, descends to a NEW spot, never retracing → no ceiling look.
+      float travel=t-0.5;                                  // linear travel across the range, centred on launch
+      float wx=dirv.x*u_throw*travel;
+      float wz=max(0.15, 1.0 + dirv.y*u_throw*travel);     // depth travels too (recede / approach)
+      float base=4.0*t*(1.0-t);                            // parabola: 0 at launch, peak mid-flight, 0 at landing
+      float h=u_arc*pow(base, mix(1.0,0.55,u_steep));      // steep rounds the apex for a floatier hang
       // perspective divide: lateral, height and size all scale by depth
       float pz=mix(1.0, wz, u_persp);
       float sc=max(0.02,u_scale)/pz;
@@ -1338,7 +1342,7 @@ function uniformDeclFor(p){
 const opGL = {}; // name -> {prog, aPos, loc:{}, paramLoc:{}}
 for(const name in OPS){
   const op=OPS[name];
-  if(op.canvas||op.media) continue; // canvas/media ops are texture-upload driven, not GLSL
+  if(op.canvas||op.media||op.timeecho) continue; // canvas/media/timeecho run custom render paths, not a GLSL program
   const decls = op.params.map(uniformDeclFor).join('\n');
   const fs = GLSL_HEADER + '\n' + decls + '\n' + op.body + `
 out vec4 fragColor;
@@ -1417,6 +1421,7 @@ function removeNode(n){
   conns=conns.filter(c=>c.from!==n.id && c.to!==n.id);
   if(n._t){ gl.deleteTexture(n._t.tex); gl.deleteFramebuffer(n._t.fbo); }
   if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); }
+  teFreeRing(n);
   nodes=nodes.filter(x=>x!==n);
   if(selected===n){ selected=null; renderPanel(); }
 }
@@ -1933,7 +1938,62 @@ function runMediaOp(n){
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
 }
 
-function renderGraph(){ 
+// ---- time echo: discrete multi-tap delay line ----
+function teFreeRing(n){ if(n._ring){ n._ring.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); n._ring=null; } }
+// draw srcTex into the given framebuffer, scaled/offset/faded (no blending)
+function teBlit(fbo, srcTex, scale, offx, offy, fade){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.viewport(0,0,RW,RH); gl.disable(gl.BLEND);
+  gl.useProgram(teProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, triBuf);
+  gl.enableVertexAttribArray(te_aPos); gl.vertexAttribPointer(te_aPos,2,gl.FLOAT,false,0,0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex); gl.uniform1i(te_uTex,0);
+  gl.uniform1f(te_uScale,scale); gl.uniform2f(te_uOff,offx,offy); gl.uniform1f(te_uFade,fade);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+const TE_RING=8;   // ring capacity (max copies)
+function runTimeEcho(n){
+  const taps=Math.max(1,Math.min(TE_RING,Math.round(pval(n,'taps'))));
+  const spacing=Math.max(1,Math.round(pval(n,'spacing')));
+  const sizeStep=pval(n,'size'), offx=pval(n,'offx'), offy=pval(n,'offy'), fadeStep=pval(n,'fade');
+  const blend=Math.round(pval(n,'blend'));
+  const c0=connInto(n.id,0);
+  const inTex=c0?nodeById(c0.from)._outTex:blackTex;
+  // (re)build the ring of frozen snapshots when missing or after a resolution change
+  if(!n._ring || n._ringW!==RW || n._ringH!==RH){
+    teFreeRing(n);
+    n._ring=[]; for(let i=0;i<TE_RING;i++) n._ring.push(makeTarget(false));
+    n._ringW=RW; n._ringH=RH; n._ringHead=0; n._ringClock=0;
+    for(let i=0;i<TE_RING;i++) teBlit(n._ring[i].fbo, inTex, 1.0, 0,0, 1.0);   // prime with current frame
+  }
+  // every `spacing` frames, freeze the current input into the next ring slot
+  if(playing && (++n._ringClock>=spacing)){
+    n._ringClock=0; n._ringHead=(n._ringHead+1)%TE_RING;
+    teBlit(n._ring[n._ringHead].fbo, inTex, 1.0, 0,0, 1.0);
+  }
+  // composite the copies into the node output: tap 0 = live input, tap k = snapshot k*spacing frames old
+  gl.bindFramebuffer(gl.FRAMEBUFFER, n._t.fbo); gl.viewport(0,0,RW,RH);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(teProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, triBuf);
+  gl.enableVertexAttribArray(te_aPos); gl.vertexAttribPointer(te_aPos,2,gl.FLOAT,false,0,0);
+  gl.enable(gl.BLEND);
+  if(blend===1){ gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.ONE,gl.ONE); }            // add
+  else if(blend===2){ gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); } // over
+  else { gl.blendEquation(gl.MAX); }                                                       // lighten
+  gl.activeTexture(gl.TEXTURE0); gl.uniform1i(te_uTex,0);
+  for(let k=taps-1;k>=0;k--){                                                              // oldest first (for 'over')
+    const tex = (k===0) ? inTex : n._ring[((n._ringHead-(k-1))%TE_RING+TE_RING)%TE_RING].tex;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1f(te_uScale, Math.pow(sizeStep,k));
+    gl.uniform2f(te_uOff, offx*k, offy*k);
+    gl.uniform1f(te_uFade, Math.pow(fadeStep,k));
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+  gl.disable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD);
+}
+
+function renderGraph(){
   const order=topoOrder();
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.SCISSOR_TEST);
   gl.viewport(0,0,RW,RH);
@@ -1953,6 +2013,7 @@ function renderGraph(){
     const op=OPS[n.op];
     if(op.canvas){ runCanvasOp(n); n._outTex=n._t.tex; continue; }
     if(op.media){ runMediaOp(n); n._outTex=n._t.tex; continue; }
+    if(op.timeecho){ runTimeEcho(n); n._outTex=n._t.tex; continue; }
     if(op.cam){ const f=(pval(n,'facing')<0.5)?'user':'environment'; if(camState.ready && camState.facing!==f && !camState.requesting) ensureCamera(f); }
     const rec=opGL[n.op];
     let writeT, prevTex=blackTex;
@@ -2955,11 +3016,19 @@ function randParams(op,n){
     const pr=PICK(pairs); p.feed=pr[0]+RND(-0.0015,0.0015); p.kill=pr[1]+RND(-0.0008,0.0008);
     p.diffB=RND(0.4,0.55); p.inject=RND(0.1,0.4); p.seedRate=RND(0.03,0.07); p.scale=RND(0.9,1.6); p.speed=RND(0.7,1.0);
   }
+  else if(op==='rise'){
+    p.dir=RINT(0,3); p.throw=RND(0.2,1.3); p.arc=RND(0.35,1.0); p.steep=RND(0.2,0.9);
+    p.speed=RND(0.08,0.4); p.scale=RND(0.25,0.9); p.persp=RND(0.2,0.8); p.xpos=RND(0.3,0.7);
+  }
+  else if(op==='timeecho'){
+    p.taps=RINT(2,5); p.spacing=RINT(4,16); p.size=RND(0.7,0.92); p.fade=RND(0.72,0.92);
+    p.offx=RND(-0.07,0.07); p.offy=RND(-0.07,0.07); p.blend=0;
+  }
 }
 
 function clearGraph(){
   nodes.forEach(n=>{ if(n._t){gl.deleteTexture(n._t.tex);gl.deleteFramebuffer(n._t.fbo);}
-    if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); } });
+    if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); } teFreeRing(n); });
   nodes=[]; conns=[]; selected=null; selWire=null;
 }
 
@@ -2982,7 +3051,7 @@ const MODT={
   composite:['mix'], displace:['amount'], feedback:['rot','zoom'], flow:['advect','swirl','scale'],
   modulate:['amount'], tonemap:['exposure'], colorama:['shift','drift'], thresh:['level'],
   rise:['speed','arc','xpos','throw','persp'],
-  timeecho:['size','decay','spin','hue']
+  timeecho:['size','fade','offx','offy']
 };
 // structural/geometric params read as "pumping" under a periodic LFO — drive them with organic waves instead
 const STRUCT_PARAMS={zoom:1,scale:1,rot:1,decay:1,camDist:1,blob:1,seg:1,advect:1,amount:1,twist:1,offx:1,offy:1,rotStep:1,tiles:1,panx:1,pany:1};

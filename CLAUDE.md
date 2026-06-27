@@ -71,8 +71,8 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 - 2-input compositor: **port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background**
 - Directional thrown-arc: content is launched in a chosen direction (forward/back/left/right relative to camera), arcs up, then falls; depth drives perspective size (forward recedes/shrinks, back rushes toward camera/grows)
 - Content alpha is respected — transparent areas show the background through
-- Motion is a true ballistic arc: launched upward under constant gravity, so it decelerates to an apex hang then accelerates on the way down
-- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (gravity strength), xpos/startY (launch point), scale (base size), persp (perspective strength)
+- Motion is driven by a single eased `0→1→0` envelope (`0.5-0.5*cos(t*TAU)`) so velocity is zero at the apex AND the loop seam → a floaty rise-and-settle with no hard ceiling bounce and no snap on loop. `steep` shapes buoyant hang at the top (`pow(s, mix(1.4,0.45,steep))`), it is NOT gravity.
+- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (hang/float), xpos/startY (launch point), scale (base size), persp (perspective strength)
 - Stack multiple Rise nodes to layer several floating images at different timings (use offset param)
 
 ### Time Echo operator (timeecho)
