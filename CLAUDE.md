@@ -25,14 +25,14 @@ bash deploy.sh
 - Internal resolution selectable, feedback ops use RGBA16F ping-pong buffers
 
 ### Operator categories
-- `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media
-- `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
+- `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media, text, coderain, hud
+- `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, vhs, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
 - `comp` — compositors (2 inputs): composite, displace, lens, modulate, rise
 - `fb` — feedback (1 input, ping-pong): feedback, flow, reaction, life, timeecho
 - `out` — output (1 input): output
 
 ### Special operator flags
-- `canvas:true` — JS/2D canvas driven (particles). Skips GL shader pipeline.
+- `canvas:true` — JS/2D canvas driven. Skips GL shader pipeline. Render loop dispatches `particles`→`runCanvasOp`, everything else (`text`, `coderain`, `hud`)→`run2D` (sets up `n._c2`/`n._cx`, calls `drawTextOp`/`drawCodeRain`/`drawHUD`, uploads canvas to texture). Text params via `P.text`. `text`/`coderain`/`hud` are excluded from the randomiser (GEN_WEIGHT 0).
 - `media:true` — uploads image/gif/video as texture each frame. Skips GL shader pipeline. Image elements MUST be appended to DOM for animated GIF/WebP to work.
 - `cam:true` — uses live camera stream as uTex0 before running shader.
 - `timeecho:true` — custom multi-tap delay-line render path (`runTimeEcho`), holds its own ring of FBOs. Skips GL shader pipeline.
@@ -59,6 +59,7 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 - `P.col(key, label, hexdef)` — color picker (vec4 uniform)
 - `P.bool(key, label, def)` — toggle (float 0/1)
 - `P.file(key, label)` — file URL string, no shader uniform, shows upload button in panel
+- `P.text(key, label, def)` — multi-line text string, no shader uniform, shows a textarea in panel (used by the `text` op)
 
 ### Randomiser
 - `randomize(feel)` — builds N candidates, scores each, keeps best

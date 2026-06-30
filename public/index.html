@@ -1341,6 +1341,16 @@ vec4 render(vec2 uv){
       P.f('trail','trail length',0.6,0.99,0.92,0.005), P.f('glow','head glow',0,1,0.7,0.01) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
+  // DATA WALL — a stationary grid of glyphs that flip/switch in place (the "decoding" / hacker-readout
+  // look). Each cell randomly cycles to a new character and flashes bright as it changes.
+  datawall:{ cat:'gen', ins:0, canvas:true, params:[
+      P.sel('charset','glyphs',['katakana','binary','hex','code','digits','math'],3),
+      P.f('cols','density',8,120,42,1), P.f('flip','switch rate',0,1,0.3,0.01),
+      P.col('color','color','#39d6c0ff'), P.col('bg','background','#04060aff'),
+      P.f('highlight','flash on switch',0,1,0.6,0.01), P.f('glow','glow',0,1,0.35,0.01),
+      P.f('fill','fill',0.3,1,0.92,0.01) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
   // DETECT HUD — sci-fi feature-tracking overlay: target boxes with corner brackets, link lines and
   // equation/coordinate labels (procedural, transparent bg). Composite it over a video to "scan" it.
   hud:{ cat:'gen', ins:0, canvas:true, params:[
@@ -1765,12 +1775,13 @@ function runSlime(n,ps,ctx,w,h,pts,P){
 function run2D(n){
   if(!n._c2 || n._c2.width!==RW || n._c2.height!==RH){
     n._c2=document.createElement('canvas'); n._c2.width=RW; n._c2.height=RH;
-    n._cx=n._c2.getContext('2d'); n._rain=null; n._hud=null;
+    n._cx=n._c2.getContext('2d'); n._rain=null; n._hud=null; n._wall=null;
   }
   const ctx=n._cx;
   if(n.op==='text') drawTextOp(n,ctx);
   else if(n.op==='coderain') drawCodeRain(n,ctx);
   else if(n.op==='hud') drawHUD(n,ctx);
+  else if(n.op==='datawall') drawDataWall(n,ctx);
   gl.bindTexture(gl.TEXTURE_2D, n._t.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE, n._c2);
@@ -1849,6 +1860,37 @@ function drawCodeRain(n,ctx){
   ctx.shadowBlur=0;
 }
 
+function drawDataWall(n,ctx){
+  const W=RW,H=RH;
+  const cols=Math.max(6,Math.round(pval(n,'cols')));
+  const cw=W/cols, rows=Math.max(1,Math.ceil(H/cw));
+  const set=rainCharset(Math.round(pval(n,'charset')));
+  const fillP=pval(n,'fill');
+  if(!n._wall || n._wall.cols!==cols || n._wall.rows!==rows || n._wall.w!==W){
+    const N=cols*rows, chars=new Array(N), b=new Float32Array(N), on=new Uint8Array(N);
+    for(let i=0;i<N;i++){ chars[i]=set[Math.floor(Math.random()*set.length)]; b[i]=Math.random()*0.4; on[i]=Math.random()<fillP?1:0; }
+    n._wall={cols,rows,w:W,chars,b,on};
+  }
+  const flip=pval(n,'flip'), hi=pval(n,'highlight'), glow=pval(n,'glow');
+  const dim=hexToRGBA(n.params.color||'#39d6c0ff');
+  ctx.fillStyle=cssRGBA(n.params.bg||'#04060aff'); ctx.fillRect(0,0,W,H);
+  const fpx=cw*0.92;
+  ctx.font=fpx+'px monospace'; ctx.textBaseline='top'; ctx.textAlign='left';
+  if(glow>0.01){ ctx.shadowColor=cssRGBA(n.params.color||'#39d6c0ff'); ctx.shadowBlur=fpx*glow*0.6; }
+  const flipProb=flip*0.12*Math.min(3,simDt*60);
+  const w=n._wall;
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const i=r*cols+c;
+    if(Math.random()<flipProb){ w.chars[i]=set[Math.floor(Math.random()*set.length)]; w.b[i]=1.0; if(Math.random()<0.015) w.on[i]=Math.random()<fillP?1:0; }
+    else w.b[i]*=0.90;
+    if(!w.on[i]) continue;
+    const f=0.32+0.68*w.b[i], fl=w.b[i]*hi*190;       // dim base + bright flash as it switches
+    const rr=Math.min(255,Math.round(dim[0]*255*f+fl)), gg=Math.min(255,Math.round(dim[1]*255*f+fl)), bb=Math.min(255,Math.round(dim[2]*255*f+fl));
+    ctx.fillStyle='rgb('+rr+','+gg+','+bb+')';
+    ctx.fillText(w.chars[i], c*cw+(cw-fpx)*0.4, r*cw+(cw-fpx)*0.2);
+  }
+  ctx.shadowBlur=0;
+}
 function drawBracketBox(ctx,x,y,w,h,c){
   ctx.beginPath();
   ctx.moveTo(x,y+c); ctx.lineTo(x,y); ctx.lineTo(x+c,y);
@@ -2251,7 +2293,7 @@ function renderGraph(){
 
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
-  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',coderain:'Code Rain',hud:'Detect HUD',vhs:'VHS',
+  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',vhs:'VHS',
   feedback:'Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
@@ -3294,7 +3336,7 @@ function opAllowed(op){ if(GEN.exclude && GEN.exclude[op]) return false; return 
 function rmk(op){ const n=addNode(op,40,40); randParams(op,n); return n; }
 function rlink(a,b,port){ conns.push({from:a.id,to:b.id,port:port||0}); }
 // weight generator choice toward structured/detailed sources; constant=0 (never a random source)
-const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0,text:0,coderain:0,hud:0};
+const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0,text:0,coderain:0,datawall:0,hud:0};
 function gw(o){ return GEN_WEIGHT[o]==null?1:GEN_WEIGHT[o]; }
 function wpick(list){
   const pool=list.filter(o=>gw(o)>0);
