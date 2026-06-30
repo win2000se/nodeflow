@@ -28,7 +28,7 @@ bash deploy.sh
 - `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media, text, text3d, coderain, datawall, hud
 - `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, vhs, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
 - `comp` — compositors (2 inputs): composite, displace, lens, modulate, rise
-- `fb` — feedback (1 input, ping-pong): feedback, flow, reaction, life, timeecho
+- `fb` — feedback (1 input, ping-pong): feedback, analogfb, flow, reaction, life, timeecho
 - `out` — output (1 input): output
 
 ### Special operator flags
@@ -77,6 +77,11 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 - `throw` is the travel distance/range — change via slider or via the randomiser (randParams has a `rise` case).
 - Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (apex hang), xpos/startY (launch point), scale (base size), persp (perspective strength)
 - Stack multiple Rise nodes to layer several floating images at different timings (use offset param)
+
+### Analog Feedback operator (analogfb)
+- Feedback op emulating camera-pointed-at-CRT video feedback: each pass is defocused (9-tap blur), hue-shifted, lens-barrel-warped and soft-screen-blended, then `contrast` sharpens. Blur diffuses + contrast sharpens → injected blobs self-organise into evolving Turing-like patterns instead of crisp digital duplicates (the `feedback` op's hard `max` look).
+- Key params: blur (defocus — the diffusion driver), contrast (structure), zoom/rot (recursion geometry → spirals), hue/sat (colour drift), decay (persistence), inject (input feed), lens (barrel), cx/cy + offx/offy.
+- Usage: feed a source in, keep `inject` low-ish, and briefly introduce motion/content — it blooms over several seconds. Chain `analogfb → crt`/`vhs` for full analog CRT look.
 
 ### Time Echo operator (timeecho)
 - True multi-tap temporal dilator with a **custom render path** (`timeecho:true` flag → `runTimeEcho`, NOT a GLSL feedback loop). Keeps a ring (`n._ring`, capacity `TE_RING=8`) of frozen input snapshots taken every `spacing` frames, then composites N of them as discrete copies — each from a distinct past moment, shrunk (`size^k`), offset (`off*k`) and faded (`fade^k`). Feed it a moving input (e.g. shape→rise) for several real copies frozen at different times AND sizes.

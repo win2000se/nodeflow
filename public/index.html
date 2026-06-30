@@ -1486,6 +1486,18 @@ function hexToRGBA(h){
 function rgbaToHex(a){ return '#'+a.slice(0,3).map(x=>('0'+Math.round(x*255).toString(16)).slice(-2)).join(''); }
 function cssRGBA(h){ const c=hexToRGBA(h); return 'rgba('+Math.round(c[0]*255)+','+Math.round(c[1]*255)+','+Math.round(c[2]*255)+','+c[3].toFixed(3)+')'; }
 function lightenHex(h,amt){ const c=hexToRGBA(h); const m=x=>Math.round(Math.min(1,x+(1-x)*amt)*255); return 'rgba('+m(c[0])+','+m(c[1])+','+m(c[2])+',1)'; }
+function lightenRGBA(c,amt){ const m=x=>Math.round(Math.min(1,x+(1-x)*amt)*255); return 'rgba('+m(c[0])+','+m(c[1])+','+m(c[2])+',1)'; }
+// ---- colour modulation: a mod signal on a colour param rotates its hue ----
+function rgb2hsvJS(r,g,b){ const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn; let h=0;
+  if(d){ if(mx===r)h=((g-b)/d)%6; else if(mx===g)h=(b-r)/d+2; else h=(r-g)/d+4; h/=6; if(h<0)h+=1; }
+  return [h, mx?d/mx:0, mx]; }
+function hsv2rgbJS(h,s,v){ const i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);
+  switch(i%6){case 0:return[v,t,p];case 1:return[q,v,p];case 2:return[p,v,t];case 3:return[p,q,v];case 4:return[t,p,v];default:return[v,p,q];} }
+function modColor(hex, off){ const c=hexToRGBA(hex); if(off==null||off===0) return c;
+  const hs=rgb2hsvJS(c[0],c[1],c[2]); let h=(hs[0]+off)%1; if(h<0)h+=1;
+  const rgb=hsv2rgbJS(h,hs[1],hs[2]); return [rgb[0],rgb[1],rgb[2],c[3]]; }
+function pcol(n,key){ return modColor(n.params[key], modMap(n)[key]); }                 // modulated rgba [0..1]
+function pcolCss(n,key){ const c=pcol(n,key); return 'rgba('+Math.round(c[0]*255)+','+Math.round(c[1]*255)+','+Math.round(c[2]*255)+','+c[3].toFixed(3)+')'; }
 
 // black 1x1 fallback texture
 const blackTex = gl.createTexture();
@@ -1706,7 +1718,7 @@ function setUniformsFor(n,rec){
   const mm=modMap(n);
   op.params.forEach(p=>{
     const loc=rec.pLoc[p.key]; if(loc==null) return;
-    if(p.type==='color'){ const c=hexToRGBA(n.params[p.key]); gl.uniform4f(loc,c[0],c[1],c[2],c[3]); }
+    if(p.type==='color'){ const c=modColor(n.params[p.key], mm[p.key]); gl.uniform4f(loc,c[0],c[1],c[2],c[3]); }
     else{
       let val=n.params[p.key];
       if(mm[p.key]!=null){ val=Math.max(p.min,Math.min(p.max,val+mm[p.key])); }
@@ -1840,13 +1852,13 @@ const TEXT_FONTS=['monospace','sans-serif','serif','Impact, Charcoal, sans-serif
 function drawTextOp(n,ctx){
   const W=RW,H=RH;
   ctx.clearRect(0,0,W,H);
-  const bg=n.params.bg||'#00000000', bgc=hexToRGBA(bg);
-  if(bgc[3]>0.001){ ctx.fillStyle=cssRGBA(bg); ctx.fillRect(0,0,W,H); }
+  const bgc=pcol(n,'bg');
+  if(bgc[3]>0.001){ ctx.fillStyle=pcolCss(n,'bg'); ctx.fillRect(0,0,W,H); }
   const fam=TEXT_FONTS[Math.round(pval(n,'font'))]||'monospace';
   const px=Math.max(4, pval(n,'size')/100*H);
   ctx.font='bold '+px+'px '+fam; ctx.textBaseline='middle';
   const align=Math.round(pval(n,'align')); ctx.textAlign=['center','left','right'][align];
-  const colorHex=n.params.color||'#ffffffff', css=cssRGBA(colorHex);
+  const fc=pcol(n,'color'), css=pcolCss(n,'color');
   const style=Math.round(pval(n,'style'));
   const motion=Math.round(pval(n,'motion')), speed=pval(n,'speed');
   let content=n.params.content||'';
@@ -1861,7 +1873,7 @@ function drawTextOp(n,ctx){
       ctx.save(); ctx.shadowColor=css; ctx.fillStyle=css;
       ctx.shadowBlur=Math.min(34,px*0.30); ctx.fillText(str,x,y);
       ctx.shadowBlur=Math.min(14,px*0.13); ctx.fillText(str,x,y);
-      ctx.shadowBlur=0; ctx.fillStyle=lightenHex(colorHex,0.8); ctx.fillText(str,x,y);
+      ctx.shadowBlur=0; ctx.fillStyle=lightenRGBA(fc,0.8); ctx.fillText(str,x,y);
       ctx.restore(); return;
     }
     if(style===1){ ctx.lineWidth=Math.max(1.2,px*0.07); ctx.strokeStyle=css; ctx.strokeText(str,x,y); return; }
@@ -1888,7 +1900,7 @@ function drawText3D(n,ctx){
   const fam=TEXT_FONTS[Math.round(pval(n,'font'))]||'sans-serif';
   const px=Math.max(6, pval(n,'size')/100*H);
   ctx.font='bold '+px+'px '+fam; ctx.textAlign='center'; ctx.textBaseline='middle';
-  const dim=hexToRGBA(n.params.color||'#5b8cffff');
+  const dim=pcol(n,'color');
   const depth=Math.max(1,Math.round(pval(n,'depth')));
   const light=pval(n,'light'), motion=Math.round(pval(n,'motion')), speed=pval(n,'speed'), tilt=pval(n,'tilt');
   const lines=(n.params.content||'').split('\n'); const lh=px*1.2;
@@ -1932,7 +1944,7 @@ function drawCodeRain(n,ctx){
   ctx.fillRect(0,0,W,H);
   ctx.font=fpx+'px monospace'; ctx.textBaseline='top';
   const set=rainCharset(Math.round(pval(n,'charset')));
-  const head=lightenHex(n.params.color||'#3dff7eff',0.65), css=cssRGBA(n.params.color||'#3dff7eff');
+  const fc=pcol(n,'color'), head=lightenRGBA(fc,0.65), css=pcolCss(n,'color');
   const glow=pval(n,'glow'), speed=pval(n,'speed');
   const step=Math.max(0.12, speed*Math.min(3,simDt*60)*0.7);
   if(glow>0.01){ ctx.shadowColor=css; ctx.shadowBlur=fpx*glow*0.8; }
@@ -1958,11 +1970,11 @@ function drawDataWall(n,ctx){
     n._wall={cols,rows,w:W,chars,b,on};
   }
   const flip=pval(n,'flip'), hi=pval(n,'highlight'), glow=pval(n,'glow');
-  const dim=hexToRGBA(n.params.color||'#39d6c0ff');
+  const dim=pcol(n,'color');
   ctx.fillStyle=cssRGBA(n.params.bg||'#04060aff'); ctx.fillRect(0,0,W,H);
   const fpx=cw*0.92;
   ctx.font=fpx+'px monospace'; ctx.textBaseline='top'; ctx.textAlign='left';
-  if(glow>0.01){ ctx.shadowColor=cssRGBA(n.params.color||'#39d6c0ff'); ctx.shadowBlur=fpx*glow*0.6; }
+  if(glow>0.01){ ctx.shadowColor=pcolCss(n,'color'); ctx.shadowBlur=fpx*glow*0.6; }
   const flipProb=flip*0.12*Math.min(3,simDt*60);
   const w=n._wall;
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
@@ -1994,8 +2006,8 @@ function hudLabel(mode,i,fx,fy,seed,t){
 function drawHUD(n,ctx){
   const W=RW,H=RH; ctx.clearRect(0,0,W,H);
   const nb=Math.max(1,Math.round(pval(n,'boxes'))), speed=pval(n,'speed');
-  const colHex=n.params.color||'#3ad6c0ff';
-  const css=cssRGBA(colHex), faint=cssRGBA(colHex.slice(0,7)+'55');
+  const fcol=pcol(n,'color');
+  const css=pcolCss(n,'color'), faint='rgba('+Math.round(fcol[0]*255)+','+Math.round(fcol[1]*255)+','+Math.round(fcol[2]*255)+',0.33)';
   const labelMode=Math.round(pval(n,'label')), linkAmt=pval(n,'lines'), jitter=pval(n,'jitter'), boxSz=pval(n,'size');
   ctx.lineWidth=Math.max(1,W*0.0014); ctx.font=Math.round(H*0.022)+'px monospace'; ctx.textBaseline='top';
   if(!n._hud || n._hud.nb!==nb){ const tg=[]; for(let i=0;i<nb;i++) tg.push({seed:Math.random()*1000}); n._hud={nb,tg}; }
@@ -2596,8 +2608,8 @@ function renderPanel(){
     }
     pBody.append(row);
   });
-  // modulation (multi-slot: stack several modulators on different params)
-  const floatParams=op.params.filter(p=>p.type==='float');
+  // modulation (multi-slot: stack several modulators on different params; colours modulate hue)
+  const floatParams=op.params.filter(p=>p.type==='float'||p.type==='color');
   if(floatParams.length){
     n.mods=n.mods||[];
     const m=el('div','mod');
@@ -2607,7 +2619,7 @@ function renderPanel(){
       const top=el('div','row');
       const tSel=el('select','miniSel'); tSel.style.flex='1';
       tSel.append(new Option('— target —',''));
-      floatParams.forEach(p=>tSel.append(new Option(p.label,p.key)));
+      floatParams.forEach(p=>tSel.append(new Option(p.label+(p.type==='color'?' (hue)':''),p.key)));
       tSel.value=md.param||''; tSel.onchange=()=>{ md.param=tSel.value; dirty=true; };
       const rm=el('button','xbtn','✕'); rm.title='remove modulator';
       rm.onclick=()=>{ n.mods.splice(idx,1); dirty=true; renderPanel(); };
