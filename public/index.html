@@ -1415,7 +1415,7 @@ vec4 render(vec2 uv){
       P.sel('mode','detect',['bright','dark','edges','colour','motion'],4),
       P.f('targets','max targets',1,12,6,1), P.f('sensitivity','sensitivity',0,1,0.5,0.01),
       P.col('match','colour match','#ff3030ff'), P.col('color','HUD colour','#39ff88ff'),
-      P.f('smooth','tracking smooth',0,0.95,0.6,0.01),
+      P.f('smooth','tracking smooth',0,0.97,0.82,0.005), P.f('weight','box/text weight',0.5,5,1.6,0.1),
       P.sel('label','labels',['coords','distance','confidence','none'],0),
       P.f('lines','link lines',0,1,1,0.01), P.bool('overlay','show input',1) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
@@ -2392,21 +2392,27 @@ function detectFeatures(n){
     peaks.push({x:px/W, y:(H-1-py)/H, s:bv, size:Math.max(0.04, ext/W*2.4)});
     for(let dy=-R;dy<=R;dy++) for(let dx=-R;dx<=R;dx++){ const nx=px+dx,ny=py+dy; if(nx>=0&&nx<W&&ny>=0&&ny<H) taken[ny*W+nx]=1; }
   }
-  const smooth=pval(n,'smooth'), prev=n._tracks||[], used=new Array(prev.length).fill(false), next=[];
+  // detection only sets each track's TARGET; the displayed position glides toward it every frame
+  // (see smoothTracks) so motion stays fluid regardless of the detection cadence.
+  const prev=n._tracks||[], used=new Array(prev.length).fill(false), next=[];
   peaks.forEach(pk=>{
     let bj=-1,bd=1e9; for(let j=0;j<prev.length;j++){ if(used[j])continue; const dx=prev[j].x-pk.x,dy=prev[j].y-pk.y,d=dx*dx+dy*dy; if(d<bd){bd=d;bj=j;} }
-    if(bj>=0 && bd<0.04){ used[bj]=true; const t=prev[bj];
-      t.x+=(pk.x-t.x)*(1-smooth); t.y+=(pk.y-t.y)*(1-smooth); t.size+=(pk.size-t.size)*(1-smooth); t.s=pk.s; next.push(t); }
-    else next.push({x:pk.x,y:pk.y,size:pk.size,s:pk.s,id:(n._idc=(n._idc||0)+1)});
+    if(bj>=0 && bd<0.05){ used[bj]=true; const t=prev[bj]; t.tx=pk.x; t.ty=pk.y; t.tsize=pk.size; t.s=pk.s; next.push(t); }
+    else next.push({x:pk.x,y:pk.y,size:pk.size, tx:pk.x,ty:pk.y,tsize:pk.size, s:pk.s, id:(n._idc=(n._idc||0)+1)});
   });
   n._tracks=next;
+}
+function smoothTracks(n){
+  const a=1-Math.pow(Math.max(0,Math.min(0.999,pval(n,'smooth'))), Math.max(0.2,simDt*60));   // framerate-independent glide
+  (n._tracks||[]).forEach(t=>{ t.x+=(t.tx-t.x)*a; t.y+=(t.ty-t.y)*a; t.size+=(t.tsize-t.size)*a; });
 }
 function drawTrackHUD(n,ctx){
   const W=RW,H=RH; ctx.clearRect(0,0,W,H);
   const fcol=pcol(n,'color'), css=pcolCss(n,'color');
   const faint='rgba('+Math.round(fcol[0]*255)+','+Math.round(fcol[1]*255)+','+Math.round(fcol[2]*255)+',0.33)';
-  const labelMode=Math.round(pval(n,'label')), linkAmt=pval(n,'lines');
-  ctx.lineWidth=Math.max(1,W*0.0016); ctx.font=Math.round(H*0.02)+'px monospace'; ctx.textBaseline='top';
+  const labelMode=Math.round(pval(n,'label')), linkAmt=pval(n,'lines'), wt=pval(n,'weight');
+  ctx.lineWidth=Math.max(1,W*0.0016*wt); ctx.font=Math.round(Math.min(H*0.06, H*0.018*(0.5+0.55*wt)))+'px monospace'; ctx.textBaseline='top';
+  ctx.shadowColor='rgba(0,0,0,0.8)'; ctx.shadowBlur=Math.max(2,W*0.0016*wt);   // dark halo → legible over busy video
   const tr=n._tracks||[], pts=[];
   tr.forEach((t,i)=>{
     const x=t.x*W, y=t.y*H, bw=Math.max(W*0.03,t.size*W), bh=bw;
@@ -2423,6 +2429,7 @@ function drawTrackHUD(n,ctx){
     for(let i=0;i<pts.length;i++){ let bj=-1,bd=1e9; for(let j=0;j<pts.length;j++){ if(j===i)continue; const d=Math.hypot(pts[j].x-pts[i].x,pts[j].y-pts[i].y); if(d<bd){bd=d;bj=j;} } if(bj>=0){ ctx.moveTo(pts[i].x,pts[i].y); ctx.lineTo(pts[bj].x,pts[bj].y); } }
     ctx.stroke(); }
   const sy=(0.5+0.5*Math.sin(time*0.8))*H; ctx.strokeStyle=faint; ctx.beginPath(); ctx.moveTo(0,sy);ctx.lineTo(W,sy);ctx.stroke();
+  ctx.shadowBlur=0;
 }
 function runTrackHUD(n){
   const c0=connInto(n.id,0);
@@ -2435,6 +2442,7 @@ function runTrackHUD(n){
     gl.readPixels(0,0,TRACK_W,TRACK_H,gl.RGBA,gl.UNSIGNED_BYTE,n._dsBuf);
     detectFeatures(n);
   }
+  smoothTracks(n);   // glide toward targets every frame → smooth even though detection is throttled
   if(!n._c2 || n._c2.width!==RW || n._c2.height!==RH){ n._c2=document.createElement('canvas'); n._c2.width=RW; n._c2.height=RH; n._cx=n._c2.getContext('2d'); }
   drawTrackHUD(n, n._cx);
   if(!n._hudTex) n._hudTex=gl.createTexture();

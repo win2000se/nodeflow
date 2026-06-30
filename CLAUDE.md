@@ -26,7 +26,7 @@ bash deploy.sh
 
 ### Operator categories
 - `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media, text, text3d, coderain, datawall, hud
-- `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, vhs, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
+- `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, vhs, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh, trackhud (real detection)
 - `comp` — compositors (2 inputs): composite, displace, lens, modulate, rise
 - `fb` — feedback (1 input, ping-pong): feedback, analogfb, flow, reaction, life, timeecho
 - `out` — output (1 input): output
@@ -36,6 +36,7 @@ bash deploy.sh
 - `media:true` — uploads image/gif/video as texture each frame. Skips GL shader pipeline. Image elements MUST be appended to DOM for animated GIF/WebP to work.
 - `cam:true` — uses live camera stream as uTex0 before running shader.
 - `timeecho:true` — custom multi-tap delay-line render path (`runTimeEcho`), holds its own ring of FBOs. Skips GL shader pipeline.
+- `track:true` — `trackhud` op (real detection). Custom path `runTrackHUD`: GPU-downsample input to 96×54 (`blitTexTo`/`makeSmallTarget`), `gl.readPixels` it, `detectFeatures` (bright/dark/edges/colour/motion saliency → threshold → NMS top-N → nearest-neighbour track smoothing) every 2nd frame, draw boxes on a canvas (`drawTrackHUD`), composite input + overlay into `_t`. The separate procedural `hud` op (cat gen, fake) is kept. Cleanup via `freeTrack` in removeNode/clearGraph.
 
 ### GLSL helpers available in all shaders
 `hash21`, `hash22`, `vnoise`, `fbm`, `rot2(vec2,float)`, `wrapUV`, `rgb2hsv`, `hsv2rgb`, `blendm`, `sdSphere`, `sdBox`, `sdTorus`, `sdCapsule`, `sdOcta`, `sdCyl`, `smin3`
