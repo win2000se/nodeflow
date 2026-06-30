@@ -83,6 +83,12 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 - Implemented via `teProg`/`teBlit` (draws a texture scaled/offset/faded into an FBO). Composited with MAX (lighten, default — best for opaque content like rise output), ADD, or alpha OVER. Ring cleaned up in `removeNode`/`clearGraph`/on resolution change (`teFreeRing`).
 - Params: taps (copies 1-7), spacing (frames between copies), size (size step/copy), fade (fade/copy), offx/offy (offset/copy), blend.
 
+### Post-FX chain (locked through randomise)
+- `✨ Post FX` toolbar button → a bottom bar to stack **filter** effects applied to the final output every frame, *outside* the node graph.
+- Lives in a separate `postFX` array (not `nodes`), so the randomiser — which only rebuilds `nodes` — never touches it. Pin CRT/VHS here and randomise everything upstream.
+- `applyPostFX(srcTex)` ping-pongs the output through each entry's shader (`opGL[op].prog` + `setUniformsFor`); injected right after the output resolve in `renderGraph` (skipped when `scoring`). Entries are node-like `{op,params,mods,post:true,_t}` and are editable by selecting their chip (sets `selected`, reuses the param panel). Saved/loaded with the patch (`post:` key); deck recall and load carry it.
+- `🆕 Clear patch` (File menu) → `clearPatch()` wipes the graph to a single Output node for building from scratch; leaves the Post-FX chain intact.
+
 ### VJ deck bank
 - 8 slots, persisted to localStorage
 - `🎚 Decks` toolbar button

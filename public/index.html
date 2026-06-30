@@ -1103,6 +1103,41 @@ vec4 render(vec2 uv){
       return vec4(clamp(r,0.,1.), max(inp.a,prev.a));
     }` },
 
+  // ANALOG FEEDBACK — emulates pointing a camera at a CRT: each recursive pass is slightly defocused
+  // (blurred), hue-shifted and softly blended, plus a lens-barrel warp. The blur diffuses while the
+  // contrast sharpens, so a briefly-injected blob spreads and self-organises into evolving patterns
+  // (Turing-like) rather than crisp digital duplicates. Inject content briefly, then watch it bloom.
+  analogfb:{ cat:'fb', ins:1, params:[
+      P.f('zoom','zoom',0.9,1.1,1.012,0.001), P.f('rot','rotate',-0.2,0.2,0.045,0.001),
+      P.f('cx','center X',0,1,0.5,0.005), P.f('cy','center Y',0,1,0.5,0.005),
+      P.f('offx','drift X',-0.04,0.04,0,0.001), P.f('offy','drift Y',-0.04,0.04,0,0.001),
+      P.f('blur','defocus',0,1,0.4,0.01), P.f('lens','lens warp',0,0.6,0.15,0.01),
+      P.f('hue','colour drift',0,1,0.18,0.01), P.f('sat','saturation',0.7,1.3,1.03,0.01),
+      P.f('decay','persistence',0.9,1.0,0.985,0.002), P.f('inject','input feed',0,1,0.5,0.01),
+      P.f('contrast','structure',0.9,1.25,1.07,0.01) ],
+    feedback:true,
+    body:`vec4 render(vec2 uv){
+      vec2 c=vec2(u_cx,u_cy);
+      vec2 p=uv-c; float r2=dot(p,p);
+      p*=1.0+u_lens*r2*0.6;                       // camera lens barrel curvature
+      p=rot2(p,u_rot); p/=max(u_zoom,0.001);
+      p+=c+vec2(u_offx,u_offy);
+      p=clamp(p,0.001,0.999);
+      vec2 e=(0.6+u_blur*3.5)/uRes.xy;            // defocus radius (compounds into diffusion over passes)
+      vec3 prev=texture(uPrev,p).rgb*0.25
+        +(texture(uPrev,p+vec2(e.x,0.0)).rgb+texture(uPrev,p-vec2(e.x,0.0)).rgb
+         +texture(uPrev,p+vec2(0.0,e.y)).rgb+texture(uPrev,p-vec2(0.0,e.y)).rgb)*0.125
+        +(texture(uPrev,p+e).rgb+texture(uPrev,p-e).rgb
+         +texture(uPrev,p+vec2(e.x,-e.y)).rgb+texture(uPrev,p+vec2(-e.x,e.y)).rgb)*0.0625;
+      vec3 hsv=rgb2hsv(prev);                      // analog colour drift each pass
+      hsv.x=fract(hsv.x+u_hue*0.02); hsv.y=clamp(hsv.y*u_sat,0.0,1.0);
+      prev=hsv2rgb(hsv)*u_decay;
+      vec3 inp=texture(uTex0,uv).rgb;
+      vec3 col=1.0-(1.0-prev)*(1.0-inp*u_inject);  // soft screen injection (no hard duplicates)
+      col=(col-0.5)*u_contrast+0.5;                // nonlinearity → self-organising structure
+      return vec4(clamp(col,0.0,1.0),1.0);
+    }` },
+
   // TIME ECHO — true multi-tap temporal dilator (custom render path, not a shader feedback loop).
   // It keeps a ring of frozen snapshots of the input taken every `spacing` frames, then draws N of
   // them as discrete copies, each from a distinct moment in the past, shrunk/offset/faded. Feed it a
@@ -2346,7 +2381,7 @@ function renderGraph(){
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
   level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',text3d:'Text 3D',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',vhs:'VHS',
-  feedback:'Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
+  feedback:'Feedback',analogfb:'Analog Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
 //----------------------------------------------------------------- view + bounds
@@ -3435,7 +3470,7 @@ const MODT={
   blur:['radius'], mirror:['rot','seg','zoom','twist'], edge:['strength'], crt:['aberration','curve'], warp:['amount','swirl','speed'],
   fractal:['rotStep','offx','offy','scale','rot'],
   palette:['shift','contrast'], bloom:['threshold','intensity','radius'],
-  composite:['mix'], displace:['amount'], feedback:['rot','zoom'], flow:['advect','swirl','scale'],
+  composite:['mix'], displace:['amount'], feedback:['rot','zoom'], analogfb:['rot','zoom','hue','blur'], flow:['advect','swirl','scale'],
   modulate:['amount'], tonemap:['exposure'], colorama:['shift','drift'], thresh:['level'],
   rise:['speed','arc','xpos','throw','persp'],
   timeecho:['size','fade','offx','offy']
