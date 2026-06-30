@@ -166,6 +166,7 @@
   <button class="btn" id="bPerf">⤢ Perform</button>
   <button class="btn" id="bFile">⤓ File</button>
   <button class="btn" id="bDecks" title="VJ deck bank — store patches and crossfade between them">🎚 Decks</button>
+  <button class="btn" id="bPost" title="Post-FX chain — effects locked onto the output, untouched by randomise">✨ Post FX</button>
   <button class="btn" id="bLib" title="Patch library (server)" style="display:none">☁ Library</button>
   <span class="lfoctl" title="Master LFO speed — scales every modulator's rate"><span class="lfolab">LFO</span><input type="range" id="bLfo" min="-1.3" max="1.3" step="0.01" value="0"><span class="lfoval" id="bLfoV">1.0×</span></span>
   <span class="spacer"></span>
@@ -2329,6 +2330,7 @@ function renderGraph(){
   // resolve output
   const outNode=nodes.find(n=>n.op==='output');
   outputTex = outNode ? outNode._outTex : (selected?selected._outTex:(order.length?order[order.length-1]._outTex:blackTex));
+  if(!scoring) outputTex = applyPostFX(outputTex);   // locked end-of-chain effects (not scored by randomiser)
   // deck crossfade: dissolve from the frozen previous patch (xf.hold) to the live one
   if(xf.active && !scoring){
     ensureXf();
@@ -2507,7 +2509,7 @@ function renderPanel(){
     return;
   }
   const n=selected, op=OPS[n.op], col=catColor(op.cat);
-  pName.textContent=NAME[n.op]; pSw.style.background=col;
+  pName.textContent=NAME[n.op]+(n.post?'  · POST FX':''); pSw.style.background=col;
   pBody.innerHTML='';
   op.params.forEach(p=>{
     const row=el('div','row');
@@ -2611,6 +2613,13 @@ function renderPanel(){
   }
   // actions
   const act=el('div','mod');
+  if(n.post){   // a Post-FX entry: only offer removal from the chain
+    const del=el('button','btn danger'); del.style.width='100%'; del.textContent='Remove from Post FX';
+    del.onclick=()=>{ removePostFX(n); dirty=true; };
+    act.append(del);
+    pBody.append(act);
+    return;
+  }
   if(n.op!=='output'){
     const ob=el('button','btn'); ob.style.width='100%'; ob.textContent='Route to Output';
     ob.onclick=()=>{ let o=nodes.find(x=>x.op==='output'); if(!o){ o=addNode('output',n.x+200,n.y); }
@@ -2739,7 +2748,8 @@ window.addEventListener('keydown',e=>{
   const t=e.target;
   if(t&&(t.tagName==='INPUT'||t.tagName==='SELECT'||t.tagName==='TEXTAREA')) return;
   if(e.key==='Delete'||e.key==='Backspace'){
-    if(selected){ removeNode(selected); dirty=true; }
+    if(selected && selected.post){ removePostFX(selected); dirty=true; }
+    else if(selected){ removeNode(selected); dirty=true; }
     else if(selWire){ conns=conns.filter(c=>c!==selWire); selWire=null; dirty=true; }
     e.preventDefault();
   } else if(e.code==='Space'){ togglePlay(); e.preventDefault(); }
@@ -2830,12 +2840,88 @@ window.addEventListener('keydown',(e)=>{
   if(k>=1&&k<=DECK_N){ if(deckArm==='save'){ decks[k-1]={patch:serialize(),t:Date.now()}; saveDecks(); deckArm=null; refreshDeckBar(); } else if(decks[k-1]){ recallDeck(k-1); } }
 });
 
+//----------------------------------------------------------------- post-FX chain (locked through randomise)
+// A linear stack of filter effects applied to the final output every frame. It lives OUTSIDE the node
+// graph, so the randomiser (which only rebuilds `nodes`) never touches it — e.g. keep CRT+VHS pinned
+// here and randomise everything upstream.
+let postFX=[], postUid=1;
+function addPostFX(op){ const pn={pid:postUid++, op, params:defParams(op), mods:[], post:true}; postFX.push(pn); selected=pn; renderPanel(); buildPostBar(); dirty=true; }
+function removePostFX(pn){ if(pn._t){gl.deleteTexture(pn._t.tex);gl.deleteFramebuffer(pn._t.fbo);} postFX=postFX.filter(x=>x!==pn); if(selected===pn){selected=null; renderPanel();} buildPostBar(); dirty=true; }
+function movePost(i,d){ const j=i+d; if(j<0||j>=postFX.length) return; const t=postFX[i]; postFX[i]=postFX[j]; postFX[j]=t; buildPostBar(); dirty=true; }
+function clearPostFX(){ postFX.forEach(pn=>{ if(pn._t){gl.deleteTexture(pn._t.tex);gl.deleteFramebuffer(pn._t.fbo);} }); postFX=[]; }
+// run the chain on srcTex → returns the final texture
+function applyPostFX(srcTex){
+  if(!postFX.length) return srcTex;
+  let src=srcTex;
+  for(const pn of postFX){
+    const rec=opGL[pn.op]; if(!rec) continue;
+    if(!pn._t || pn._tw!==RW || pn._th!==RH){ if(pn._t){gl.deleteTexture(pn._t.tex);gl.deleteFramebuffer(pn._t.fbo);} pn._t=makeTarget(false); pn._tw=RW; pn._th=RH; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pn._t.fbo); gl.viewport(0,0,RW,RH);
+    gl.useProgram(rec.prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, triBuf);
+    gl.enableVertexAttribArray(rec.aPos); gl.vertexAttribPointer(rec.aPos,2,gl.FLOAT,false,0,0);
+    gl.uniform1f(rec.loc.uTime, time*timeScale);
+    gl.uniform2f(rec.loc.uRes, RW, RH);
+    gl.uniform4f(rec.loc.uAudio, audio[0],audio[1],audio[2],audio[3]);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src); gl.uniform1i(rec.loc.uTex0,0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, blackTex); gl.uniform1i(rec.loc.uTex1,1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, blackTex); gl.uniform1i(rec.loc.uPrev,2);
+    setUniformsFor(pn,rec);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    src=pn._t.tex;
+  }
+  return src;
+}
+const postBar=document.createElement('div'); postBar.id='postBar';
+postBar.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:60;display:none;gap:6px;align-items:center;padding:8px 10px;background:rgba(14,16,22,.96);border-top:1px solid #262b36;flex-wrap:wrap;backdrop-filter:blur(8px)';
+function pMini(txt,fn){ const b=document.createElement('button'); b.textContent=txt; b.style.cssText='background:none;border:none;color:#9aa3b2;cursor:pointer;font-size:11px;padding:2px 3px'; b.onclick=(e)=>{e.stopPropagation();fn();}; return b; }
+function buildPostBar(){
+  postBar.innerHTML='';
+  const lab=document.createElement('span'); lab.textContent='POST FX → output (kept through randomise):'; lab.style.cssText='font-family:var(--mono);font-size:11px;color:#7fe6c9;letter-spacing:.04em';
+  postBar.appendChild(lab);
+  if(!postFX.length){ const e=document.createElement('span'); e.textContent='none yet'; e.style.cssText='font-size:11px;color:#6c7686'; postBar.appendChild(e); }
+  postFX.forEach((pn,i)=>{
+    const chip=document.createElement('div'); chip.style.cssText='display:flex;align-items:center;gap:2px;background:'+(selected===pn?'#2a3b66':'#1c2029')+';border:1px solid #2a3340;border-radius:7px;padding:3px 4px 3px 8px';
+    const nm=document.createElement('span'); nm.textContent=NAME[pn.op]||pn.op; nm.style.cssText='font-size:12px;cursor:pointer;color:#cdd4df;margin-right:2px'; nm.title='edit params';
+    nm.onclick=()=>{ selected=pn; renderPanel(); buildPostBar(); };
+    chip.append(nm, pMini('◂',()=>movePost(i,-1)), pMini('▸',()=>movePost(i,1)), pMini('✕',()=>removePostFX(pn)));
+    postBar.appendChild(chip);
+  });
+  const add=document.createElement('button'); add.className='btn acc'; add.textContent='＋ Add effect';
+  add.onclick=(e)=>{ e.stopPropagation(); openPostAddMenu(add); };
+  postBar.appendChild(add);
+}
+function openPostAddMenu(anchor){
+  closePostAddMenu();
+  const m=document.createElement('div'); m.id='postAddMenu';
+  m.style.cssText='position:fixed;z-index:70;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px;max-height:55vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.5)';
+  Object.keys(OPS).filter(k=>OPS[k].cat==='filt').forEach(k=>{
+    const it=document.createElement('div'); it.textContent=NAME[k]||k;
+    it.style.cssText='padding:7px 14px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px;color:#cdd4df';
+    it.onmouseenter=()=>it.style.background='#232936'; it.onmouseleave=()=>it.style.background='';
+    it.onclick=()=>{ addPostFX(k); closePostAddMenu(); };
+    m.appendChild(it);
+  });
+  document.body.appendChild(m);
+  const r=anchor.getBoundingClientRect(); m.style.left=Math.min(r.left,window.innerWidth-190)+'px'; m.style.bottom=(window.innerHeight-r.top+6)+'px';
+  setTimeout(()=>document.addEventListener('click',closePostAddMenu,{once:true}),0);
+}
+function closePostAddMenu(){ const m=document.getElementById('postAddMenu'); if(m) m.remove(); }
+document.body.appendChild(postBar); buildPostBar();
+document.getElementById('bPost').addEventListener('click',()=>{
+  const show = postBar.style.display==='none';
+  postBar.style.display = show?'flex':'none';
+  document.getElementById('bPost').classList.toggle('acc', show);
+  if(show){ deckBar.style.display='none'; document.getElementById('bDecks').classList.remove('acc'); buildPostBar(); }
+});
+
 //----------------------------------------------------------------- save / load / export
 let recClean=false, mediaRec=null, recChunks=[];
 function serialize(){
   return JSON.stringify({ v:1, res:[outRes[0],outRes[1]], tscale:+timeScale.toFixed(3), view:{x:Math.round(view.x),y:Math.round(view.y),z:+view.z.toFixed(4)},
     nodes:nodes.map(n=>({id:n.id,op:n.op,x:Math.round(n.x),y:Math.round(n.y),params:n.params,mods:n.mods||[]})),
-    conns:conns.map(c=>({from:c.from,to:c.to,port:c.port||0})) }, null, 1);
+    conns:conns.map(c=>({from:c.from,to:c.to,port:c.port||0})),
+    post:postFX.map(pn=>({op:pn.op,params:pn.params,mods:pn.mods||[]})) }, null, 1);
 }
 function deserialize(str){
   let d; try{ d=JSON.parse(str); }catch(e){ alert('Could not parse patch JSON.'); return false; }
@@ -2853,6 +2939,9 @@ function deserialize(str){
   });
   uid = maxId+1;
   (d.conns||[]).forEach(c=>{ if(nodeById(c.from)&&nodeById(c.to)) conns.push({from:c.from,to:c.to,port:c.port||0}); });
+  clearPostFX();
+  (d.post||[]).forEach(pd=>{ if(OPS[pd.op]&&OPS[pd.op].cat==='filt') postFX.push({pid:postUid++, op:pd.op, params:Object.assign(defParams(pd.op), pd.params||{}), mods:Array.isArray(pd.mods)?pd.mods:[], post:true}); });
+  buildPostBar();
   if(d.view){ view.x=d.view.x; view.y=d.view.y; view.z=d.view.z||1; } else fitView();
   selected=null; selWire=null; renderPanel(); dirty=true;
   if(!playing) togglePlay();
@@ -3064,6 +3153,7 @@ const bFile=document.getElementById('bFile'), fileMenu=document.getElementById('
 function buildFileMenu(){
   fileMenu.innerHTML='';
   const item=(label,fn)=>{ const it=el('div','it',label); it.onclick=()=>{ closeFileMenu(); fn(); }; fileMenu.append(it); };
+  item('🆕  Clear patch (build from scratch)', clearPatch);
   item('💾  Save patch…', showExport);
   item('📂  Load patch…', showImport);
   const ld=el('div','it','📁  Load from file…'); ld.onclick=()=>{ closeFileMenu(); fileIn.click(); }; fileMenu.append(ld);
@@ -3321,6 +3411,12 @@ function clearGraph(){
   nodes.forEach(n=>{ if(n._t){gl.deleteTexture(n._t.tex);gl.deleteFramebuffer(n._t.fbo);}
     if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); } teFreeRing(n); });
   nodes=[]; conns=[]; selected=null; selWire=null;
+}
+// wipe the graph to a blank canvas (just an Output) for building from scratch. Leaves the Post-FX chain intact.
+function clearPatch(){
+  clearGraph();
+  addNode('output', 360, 120);
+  selected=null; selWire=null; renderPanel(); fitView(); dirty=true;
 }
 
 // builds a fresh, always-valid graph: every required input is wired at creation,

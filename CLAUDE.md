@@ -25,14 +25,14 @@ bash deploy.sh
 - Internal resolution selectable, feedback ops use RGBA16F ping-pong buffers
 
 ### Operator categories
-- `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media, text, coderain, datawall, hud
+- `gen` — generators (0 inputs): noise, voronoi, plasma, shape, shape3d, lattice3d, particles, truchet, shapegrid, julia, chladni, interference, metaballs, raymarch, ramp, constant, camera, media, text, text3d, coderain, datawall, hud
 - `filt` — filters (1 input): transform, level, hsv, blur, mirror, fractal, polar, pixelate, posterize, glitch, contour, edge, crt, vhs, halftone, warp, palette, bloom, echo, sharpen, tonemap, colorama, thresh
 - `comp` — compositors (2 inputs): composite, displace, lens, modulate, rise
 - `fb` — feedback (1 input, ping-pong): feedback, flow, reaction, life, timeecho
 - `out` — output (1 input): output
 
 ### Special operator flags
-- `canvas:true` — JS/2D canvas driven. Skips GL shader pipeline. Render loop dispatches `particles`→`runCanvasOp`, everything else (`text`, `coderain`, `datawall`, `hud`)→`run2D` (sets up `n._c2`/`n._cx`, calls `drawTextOp`/`drawCodeRain`/`drawDataWall`/`drawHUD`, uploads canvas to texture). Text params via `P.text`. `datawall` = stationary grid of glyphs that flip in place (per-cell brightness flashes on switch). These content ops are excluded from the randomiser (GEN_WEIGHT 0).
+- `canvas:true` — JS/2D canvas driven. Skips GL shader pipeline. Render loop dispatches `particles`→`runCanvasOp`, everything else (`text`, `text3d`, `coderain`, `datawall`, `hud`)→`run2D` (sets up `n._c2`/`n._cx`, calls `drawTextOp`/`drawText3D`/`drawCodeRain`/`drawDataWall`/`drawHUD`, uploads canvas to texture). `text` = flat (flat/outline/neon styles); `text3d` = faux-3D extruded text rotated via canvas transforms (squash by cos of each axis + depth-offset layers, shaded) with 3D-specific motion (spin Y/tumble X/swing/wobble/fly-through). Text params via `P.text`. `datawall` = stationary grid of glyphs that flip in place (per-cell brightness flashes on switch). These content ops are excluded from the randomiser (GEN_WEIGHT 0).
 - `media:true` — uploads image/gif/video as texture each frame. Skips GL shader pipeline. Image elements MUST be appended to DOM for animated GIF/WebP to work.
 - `cam:true` — uses live camera stream as uTex0 before running shader.
 - `timeecho:true` — custom multi-tap delay-line render path (`runTimeEcho`), holds its own ring of FBOs. Skips GL shader pipeline.
