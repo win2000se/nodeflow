@@ -1320,17 +1320,28 @@ vec4 render(vec2 uv){
       P.f('bright','brightness',0,2,1,0.01), P.f('sat','saturation',0,2,1,0.01) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
-  // TEXT — canvas-drawn text → texture, so every downstream effect (warp, glitch, feedback…) acts on it.
+  // TEXT — flat canvas-drawn text → texture, so every downstream effect (warp, glitch, feedback…) acts on it.
   text:{ cat:'gen', ins:0, canvas:true, params:[
       P.text('content','text','NODEFLOW'),
       P.sel('font','font',['mono','sans','serif','impact','courier','georgia'],1),
       P.f('size','size %',2,45,15,0.5),
       P.col('color','color','#ffffffff'), P.col('bg','background','#00000000'),
       P.sel('align','align',['center','left','right'],0),
-      P.sel('style','style',['flat','outline','neon','3d extrude'],0),
-      P.f('depth','3d depth',0,28,8,0.5),
+      P.sel('style','style',['flat','outline','neon'],0),
       P.sel('motion','motion',['static','scroll ←','scroll ↑','wave','typewriter','pulse'],0),
       P.f('speed','motion speed',0,3,1,0.01) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
+  // TEXT 3D — extruded text on a canvas, rotated in 3D (faux perspective). Its motion is 3D-specific:
+  // spin/tumble around the X/Y axes, swing, wobble, and fly-through, with shaded extrusion depth.
+  text3d:{ cat:'gen', ins:0, canvas:true, params:[
+      P.text('content','text','NODEFLOW'),
+      P.sel('font','font',['mono','sans','serif','impact','courier','georgia'],3),
+      P.f('size','size %',4,40,18,0.5),
+      P.col('color','face color','#5b8cffff'), P.col('bg','background','#00000000'),
+      P.f('depth','extrude depth',1,40,14,0.5), P.f('light','shading',0,1,0.7,0.01),
+      P.sel('motion','3d motion',['spin Y','tumble X','swing','wobble','fly-through','static'],0),
+      P.f('speed','motion speed',0,3,1,0.01), P.f('tilt','base tilt',-1,1,0.0,0.01) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
   // CODE RAIN — Matrix-style glitch text: scrolling columns of random glyphs that flip through characters.
@@ -1779,6 +1790,7 @@ function run2D(n){
   }
   const ctx=n._cx;
   if(n.op==='text') drawTextOp(n,ctx);
+  else if(n.op==='text3d') drawText3D(n,ctx);
   else if(n.op==='coderain') drawCodeRain(n,ctx);
   else if(n.op==='hud') drawHUD(n,ctx);
   else if(n.op==='datawall') drawDataWall(n,ctx);
@@ -1798,8 +1810,8 @@ function drawTextOp(n,ctx){
   const px=Math.max(4, pval(n,'size')/100*H);
   ctx.font='bold '+px+'px '+fam; ctx.textBaseline='middle';
   const align=Math.round(pval(n,'align')); ctx.textAlign=['center','left','right'][align];
-  const css=cssRGBA(n.params.color||'#ffffffff');
-  const style=Math.round(pval(n,'style')), depth=pval(n,'depth');
+  const colorHex=n.params.color||'#ffffffff', css=cssRGBA(colorHex);
+  const style=Math.round(pval(n,'style'));
   const motion=Math.round(pval(n,'motion')), speed=pval(n,'speed');
   let content=n.params.content||'';
   if(motion===4){ const cnt=Math.floor(time*speed*7)%(content.length+10); content=content.slice(0,Math.min(content.length,cnt)); }
@@ -1809,8 +1821,13 @@ function drawTextOp(n,ctx){
   if(motion===2) baseY = H+px - ((time*speed*70)%(H+lines.length*lh+px*2));   // scroll up
   if(motion===5){ const s=1.0+0.06*Math.sin(time*speed*4.0); ctx.save(); ctx.translate(W/2,H/2); ctx.scale(s,s); ctx.translate(-W/2,-H/2); }
   function paint(str,x,y){
-    if(style===3){ for(let i=Math.round(depth);i>=1;i--){ ctx.fillStyle='rgba(0,0,0,0.82)'; ctx.fillText(str,x+i*0.55,y+i*0.55); } ctx.fillStyle=css; ctx.fillText(str,x,y); return; }
-    if(style===2){ ctx.save(); ctx.shadowColor=css; ctx.shadowBlur=px*0.5; ctx.fillStyle=css; ctx.fillText(str,x,y); ctx.fillText(str,x,y); ctx.restore(); return; }
+    if(style===2){ // neon: a couple of soft glow passes + a crisp bright core on top
+      ctx.save(); ctx.shadowColor=css; ctx.fillStyle=css;
+      ctx.shadowBlur=Math.min(34,px*0.30); ctx.fillText(str,x,y);
+      ctx.shadowBlur=Math.min(14,px*0.13); ctx.fillText(str,x,y);
+      ctx.shadowBlur=0; ctx.fillStyle=lightenHex(colorHex,0.8); ctx.fillText(str,x,y);
+      ctx.restore(); return;
+    }
     if(style===1){ ctx.lineWidth=Math.max(1.2,px*0.07); ctx.strokeStyle=css; ctx.strokeText(str,x,y); return; }
     ctx.fillStyle=css; ctx.fillText(str,x,y);
   }
@@ -1825,6 +1842,39 @@ function drawTextOp(n,ctx){
     else paint(ln, baseX, y);
   });
   if(motion===5) ctx.restore();
+}
+
+function drawText3D(n,ctx){
+  const W=RW,H=RH;
+  ctx.clearRect(0,0,W,H);
+  const bg=n.params.bg||'#00000000', bgc=hexToRGBA(bg);
+  if(bgc[3]>0.001){ ctx.fillStyle=cssRGBA(bg); ctx.fillRect(0,0,W,H); }
+  const fam=TEXT_FONTS[Math.round(pval(n,'font'))]||'sans-serif';
+  const px=Math.max(6, pval(n,'size')/100*H);
+  ctx.font='bold '+px+'px '+fam; ctx.textAlign='center'; ctx.textBaseline='middle';
+  const dim=hexToRGBA(n.params.color||'#5b8cffff');
+  const depth=Math.max(1,Math.round(pval(n,'depth')));
+  const light=pval(n,'light'), motion=Math.round(pval(n,'motion')), speed=pval(n,'speed'), tilt=pval(n,'tilt');
+  const lines=(n.params.content||'').split('\n'); const lh=px*1.2;
+  let ay=tilt*Math.PI, ax=0, z=1;
+  if(motion===0) ay+=time*speed*0.8;                                              // spin Y
+  else if(motion===1) ax+=time*speed*0.8;                                         // tumble X
+  else if(motion===2) ay+=Math.sin(time*speed)*1.0;                              // swing
+  else if(motion===3){ ay+=Math.sin(time*speed*0.7)*0.8; ax+=Math.cos(time*speed*0.55)*0.45; }  // wobble
+  else if(motion===4){ ay+=time*speed*0.5; z=0.55+0.5*(0.5+0.5*Math.sin(time*speed*0.8)); }      // fly-through
+  let ca=Math.cos(ay); ca = ca>=0?Math.max(0.04,ca):Math.min(-0.04,ca);          // keep a sliver visible edge-on
+  const sa=Math.sin(ay), cxx=Math.max(0.04,Math.cos(ax)), sxx=Math.sin(ax);
+  ctx.save(); ctx.translate(W/2,H/2); ctx.scale(z,z);
+  for(let k=depth;k>=0;k--){                                                       // back-to-front extrusion
+    ctx.save(); ctx.transform(ca,0,0,cxx, sa*k*1.1, -sxx*k*1.1);
+    let col;
+    if(k===0) col='rgb('+Math.round(dim[0]*255)+','+Math.round(dim[1]*255)+','+Math.round(dim[2]*255)+')';
+    else { const f=Math.max(0.12,1.0-(k/depth)*light*0.85); col='rgb('+Math.round(dim[0]*255*f)+','+Math.round(dim[1]*255*f)+','+Math.round(dim[2]*255*f)+')'; }
+    ctx.fillStyle=col;
+    lines.forEach((ln,li)=>ctx.fillText(ln,0,(li-(lines.length-1)/2)*lh));
+    ctx.restore();
+  }
+  ctx.restore();
 }
 
 function rainCharset(i){
@@ -2293,7 +2343,7 @@ function renderGraph(){
 
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
-  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',vhs:'VHS',
+  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',text3d:'Text 3D',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',vhs:'VHS',
   feedback:'Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
@@ -3336,7 +3386,7 @@ function opAllowed(op){ if(GEN.exclude && GEN.exclude[op]) return false; return 
 function rmk(op){ const n=addNode(op,40,40); randParams(op,n); return n; }
 function rlink(a,b,port){ conns.push({from:a.id,to:b.id,port:port||0}); }
 // weight generator choice toward structured/detailed sources; constant=0 (never a random source)
-const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0,text:0,coderain:0,datawall:0,hud:0};
+const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0,text:0,text3d:0,coderain:0,datawall:0,hud:0};
 function gw(o){ return GEN_WEIGHT[o]==null?1:GEN_WEIGHT[o]; }
 function wpick(list){
   const pool=list.filter(o=>gw(o)>0);
