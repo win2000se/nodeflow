@@ -1408,6 +1408,18 @@ vec4 render(vec2 uv){
       P.f('size','box size',0.04,0.3,0.13,0.005) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
+  // TRACK HUD — REAL feature detection: reads the input back at low res each frame and locks tracking
+  // boxes onto actual bright/dark/edge/colour/motion regions, with real coordinates, distances and
+  // confidence. (custom render path: GPU downsample → readPixels → CPU detect+track → overlay)
+  trackhud:{ cat:'filt', ins:1, track:true, params:[
+      P.sel('mode','detect',['bright','dark','edges','colour','motion'],4),
+      P.f('targets','max targets',1,12,6,1), P.f('sensitivity','sensitivity',0,1,0.5,0.01),
+      P.col('match','colour match','#ff3030ff'), P.col('color','HUD colour','#39ff88ff'),
+      P.f('smooth','tracking smooth',0,0.95,0.6,0.01),
+      P.sel('label','labels',['coords','distance','confidence','none'],0),
+      P.f('lines','link lines',0,1,1,0.01), P.bool('overlay','show input',1) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
   // port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background behind it
   rise:{ cat:'comp', ins:2, params:[
       P.sel('dir','throw dir',['forward','back','left','right'],0),
@@ -1463,7 +1475,7 @@ function uniformDeclFor(p){
 const opGL = {}; // name -> {prog, aPos, loc:{}, paramLoc:{}}
 for(const name in OPS){
   const op=OPS[name];
-  if(op.canvas||op.media||op.timeecho) continue; // canvas/media/timeecho run custom render paths, not a GLSL program
+  if(op.canvas||op.media||op.timeecho||op.track) continue; // canvas/media/timeecho/track run custom render paths, not a GLSL program
   const decls = op.params.map(uniformDeclFor).join('\n');
   const fs = GLSL_HEADER + '\n' + decls + '\n' + op.body + `
 out vec4 fragColor;
@@ -1556,7 +1568,7 @@ function removeNode(n){
   conns=conns.filter(c=>c.from!==n.id && c.to!==n.id);
   if(n._t){ gl.deleteTexture(n._t.tex); gl.deleteFramebuffer(n._t.fbo); }
   if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); }
-  teFreeRing(n);
+  teFreeRing(n); freeTrack(n);
   nodes=nodes.filter(x=>x!==n);
   if(selected===n){ selected=null; renderPanel(); }
 }
@@ -2326,6 +2338,115 @@ function runTimeEcho(n){
   gl.disable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD);
 }
 
+// ---- TRACK HUD: real low-res feature detection + tracking ----
+const TRACK_W=96, TRACK_H=54;
+function makeSmallTarget(w,h){
+  const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const fbo=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  return {tex,fbo};
+}
+function blitTexTo(fbo, tex, w, h, blend){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo); gl.viewport(0,0,w,h);
+  if(blend){ gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); } else gl.disable(gl.BLEND);
+  gl.useProgram(teProg); gl.bindBuffer(gl.ARRAY_BUFFER,triBuf);
+  gl.enableVertexAttribArray(te_aPos); gl.vertexAttribPointer(te_aPos,2,gl.FLOAT,false,0,0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,tex); gl.uniform1i(te_uTex,0);
+  gl.uniform1f(te_uScale,1.0); gl.uniform2f(te_uOff,0,0); gl.uniform1f(te_uFade,1.0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  if(blend) gl.disable(gl.BLEND);
+}
+function freeTrack(n){ if(n._ds){ gl.deleteTexture(n._ds.tex); gl.deleteFramebuffer(n._ds.fbo); n._ds=null; } if(n._hudTex){ gl.deleteTexture(n._hudTex); n._hudTex=null; } }
+function detectFeatures(n){
+  const W=TRACK_W,H=TRACK_H,buf=n._dsBuf;
+  const mode=Math.round(pval(n,'mode')), sens=pval(n,'sensitivity'), maxN=Math.max(1,Math.round(pval(n,'targets')));
+  const match=pcol(n,'match');
+  const lum=n._lum||(n._lum=new Float32Array(W*H));
+  const sal=n._sal||(n._sal=new Float32Array(W*H));
+  for(let i=0;i<W*H;i++){ lum[i]=0.299*buf[i*4]/255+0.587*buf[i*4+1]/255+0.114*buf[i*4+2]/255; }
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=y*W+x; let s=0;
+    if(mode===0) s=lum[i];
+    else if(mode===1) s=1-lum[i];
+    else if(mode===2){ const xl=Math.max(0,x-1),xr=Math.min(W-1,x+1),yt=Math.max(0,y-1),yb=Math.min(H-1,y+1);
+      s=Math.abs(lum[i]-lum[y*W+xl])+Math.abs(lum[i]-lum[y*W+xr])+Math.abs(lum[i]-lum[yt*W+x])+Math.abs(lum[i]-lum[yb*W+x]); }
+    else if(mode===3){ const d=Math.abs(buf[i*4]/255-match[0])+Math.abs(buf[i*4+1]/255-match[1])+Math.abs(buf[i*4+2]/255-match[2]); s=Math.max(0,1-d/1.5); }
+    else { s=Math.abs(lum[i]-(n._prevLum?n._prevLum[i]:0)); }
+    sal[i]=s;
+  }
+  if(mode===4){ if(!n._prevLum)n._prevLum=new Float32Array(W*H); n._prevLum.set(lum); }
+  const thr=(mode===2||mode===4)?(0.03+sens*0.28):(mode===3?(0.25+sens*0.5):(0.18+sens*0.6));
+  const R=Math.max(2,Math.round(W*0.06));
+  const taken=n._taken||(n._taken=new Uint8Array(W*H)); taken.fill(0);
+  const peaks=[];
+  for(let k=0;k<maxN;k++){
+    let bi=-1,bv=thr;
+    for(let i=0;i<W*H;i++){ if(!taken[i]&&sal[i]>bv){ bv=sal[i]; bi=i; } }
+    if(bi<0) break;
+    const px=bi%W, py=(bi/W)|0;
+    let ext=1; for(let rr=1;rr<R;rr++){ const xx=Math.min(W-1,px+rr); if(sal[py*W+xx]>bv*0.4) ext=rr; else break; }
+    peaks.push({x:px/W, y:(H-1-py)/H, s:bv, size:Math.max(0.04, ext/W*2.4)});
+    for(let dy=-R;dy<=R;dy++) for(let dx=-R;dx<=R;dx++){ const nx=px+dx,ny=py+dy; if(nx>=0&&nx<W&&ny>=0&&ny<H) taken[ny*W+nx]=1; }
+  }
+  const smooth=pval(n,'smooth'), prev=n._tracks||[], used=new Array(prev.length).fill(false), next=[];
+  peaks.forEach(pk=>{
+    let bj=-1,bd=1e9; for(let j=0;j<prev.length;j++){ if(used[j])continue; const dx=prev[j].x-pk.x,dy=prev[j].y-pk.y,d=dx*dx+dy*dy; if(d<bd){bd=d;bj=j;} }
+    if(bj>=0 && bd<0.04){ used[bj]=true; const t=prev[bj];
+      t.x+=(pk.x-t.x)*(1-smooth); t.y+=(pk.y-t.y)*(1-smooth); t.size+=(pk.size-t.size)*(1-smooth); t.s=pk.s; next.push(t); }
+    else next.push({x:pk.x,y:pk.y,size:pk.size,s:pk.s,id:(n._idc=(n._idc||0)+1)});
+  });
+  n._tracks=next;
+}
+function drawTrackHUD(n,ctx){
+  const W=RW,H=RH; ctx.clearRect(0,0,W,H);
+  const fcol=pcol(n,'color'), css=pcolCss(n,'color');
+  const faint='rgba('+Math.round(fcol[0]*255)+','+Math.round(fcol[1]*255)+','+Math.round(fcol[2]*255)+',0.33)';
+  const labelMode=Math.round(pval(n,'label')), linkAmt=pval(n,'lines');
+  ctx.lineWidth=Math.max(1,W*0.0016); ctx.font=Math.round(H*0.02)+'px monospace'; ctx.textBaseline='top';
+  const tr=n._tracks||[], pts=[];
+  tr.forEach((t,i)=>{
+    const x=t.x*W, y=t.y*H, bw=Math.max(W*0.03,t.size*W), bh=bw;
+    pts.push({x,y});
+    ctx.strokeStyle=css; drawBracketBox(ctx,x-bw/2,y-bh/2,bw,bh,Math.min(bw,bh)*0.28);
+    ctx.strokeStyle=faint; ctx.beginPath(); ctx.moveTo(x-7,y);ctx.lineTo(x+7,y);ctx.moveTo(x,y-7);ctx.lineTo(x,y+7); ctx.stroke();
+    ctx.fillStyle=css; let lbl='';
+    if(labelMode===0) lbl='X'+Math.round(t.x*100)+' Y'+Math.round(t.y*100);
+    else if(labelMode===1){ let nd=1e9; tr.forEach((o,j)=>{ if(j!==i){ const d=Math.hypot(o.x-t.x,o.y-t.y); if(d<nd)nd=d; } }); lbl=nd<1e8?('d='+(nd*100).toFixed(1)):''; }
+    else if(labelMode===2) lbl=Math.min(99,Math.round(t.s*130))+'%';
+    if(lbl) ctx.fillText(lbl, x-bw/2, y+bh/2+3);
+  });
+  if(linkAmt>0.01 && pts.length>1){ ctx.strokeStyle=faint; ctx.beginPath();
+    for(let i=0;i<pts.length;i++){ let bj=-1,bd=1e9; for(let j=0;j<pts.length;j++){ if(j===i)continue; const d=Math.hypot(pts[j].x-pts[i].x,pts[j].y-pts[i].y); if(d<bd){bd=d;bj=j;} } if(bj>=0){ ctx.moveTo(pts[i].x,pts[i].y); ctx.lineTo(pts[bj].x,pts[bj].y); } }
+    ctx.stroke(); }
+  const sy=(0.5+0.5*Math.sin(time*0.8))*H; ctx.strokeStyle=faint; ctx.beginPath(); ctx.moveTo(0,sy);ctx.lineTo(W,sy);ctx.stroke();
+}
+function runTrackHUD(n){
+  const c0=connInto(n.id,0);
+  const inTex=c0?nodeById(c0.from)._outTex:blackTex;
+  if(!n._ds){ n._ds=makeSmallTarget(TRACK_W,TRACK_H); n._dsBuf=new Uint8Array(TRACK_W*TRACK_H*4); n._tracks=[]; n._tcnt=0; }
+  n._tcnt=(n._tcnt+1)%2;
+  if(n._tcnt===0 && !scoring){
+    blitTexTo(n._ds.fbo, inTex, TRACK_W, TRACK_H, false);     // GPU downsample
+    gl.bindFramebuffer(gl.FRAMEBUFFER, n._ds.fbo);
+    gl.readPixels(0,0,TRACK_W,TRACK_H,gl.RGBA,gl.UNSIGNED_BYTE,n._dsBuf);
+    detectFeatures(n);
+  }
+  if(!n._c2 || n._c2.width!==RW || n._c2.height!==RH){ n._c2=document.createElement('canvas'); n._c2.width=RW; n._c2.height=RH; n._cx=n._c2.getContext('2d'); }
+  drawTrackHUD(n, n._cx);
+  if(!n._hudTex) n._hudTex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,n._hudTex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,n._c2); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+  if(pval(n,'overlay')>0.5){ blitTexTo(n._t.fbo, inTex, RW, RH, false); }       // input background
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER,n._t.fbo); gl.viewport(0,0,RW,RH); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); }
+  blitTexTo(n._t.fbo, n._hudTex, RW, RH, true);                                 // HUD overlay (alpha)
+}
+
 function renderGraph(){
   const order=topoOrder();
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.SCISSOR_TEST);
@@ -2347,6 +2468,7 @@ function renderGraph(){
     if(op.canvas){ if(n.op==='particles') runCanvasOp(n); else run2D(n); n._outTex=n._t.tex; continue; }
     if(op.media){ runMediaOp(n); n._outTex=n._t.tex; continue; }
     if(op.timeecho){ runTimeEcho(n); n._outTex=n._t.tex; continue; }
+    if(op.track){ runTrackHUD(n); n._outTex=n._t.tex; continue; }
     if(op.cam){ const f=(pval(n,'facing')<0.5)?'user':'environment'; if(camState.ready && camState.facing!==f && !camState.requesting) ensureCamera(f); }
     const rec=opGL[n.op];
     let writeT, prevTex=blackTex;
@@ -2392,7 +2514,7 @@ function renderGraph(){
 
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
-  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',text3d:'Text 3D',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',vhs:'VHS',
+  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',text3d:'Text 3D',coderain:'Code Rain',datawall:'Data Wall',hud:'Detect HUD',trackhud:'Track HUD',vhs:'VHS',
   feedback:'Feedback',analogfb:'Analog Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
@@ -3456,7 +3578,7 @@ function randParams(op,n){
 
 function clearGraph(){
   nodes.forEach(n=>{ if(n._t){gl.deleteTexture(n._t.tex);gl.deleteFramebuffer(n._t.fbo);}
-    if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); } teFreeRing(n); });
+    if(n._fb){ n._fb.forEach(t=>{gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fbo);}); } teFreeRing(n); freeTrack(n); });
   nodes=[]; conns=[]; selected=null; selWire=null;
 }
 // wipe the graph to a blank canvas (just an Output) for building from scratch. Leaves the Post-FX chain intact.

@@ -56,7 +56,7 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 ### Param types
 - `P.f(key, label, min, max, def, step)` — float slider
 - `P.sel(key, label, opts[], def)` — select (passes index as float uniform)
-- `P.col(key, label, hexdef)` — color picker (vec4 uniform)
+- `P.col(key, label, hexdef)` — color picker (vec4 uniform). Can be a modulation target: a mod signal on a colour rotates its **hue** (via `modColor`), so LFO/audio cycles colour. Shader ops apply this in `setUniformsFor`; canvas ops read colours via `pcol(n,key)`/`pcolCss(n,key)` so they modulate too.
 - `P.bool(key, label, def)` — toggle (float 0/1)
 - `P.file(key, label)` — file URL string, no shader uniform, shows upload button in panel
 - `P.text(key, label, def)` — multi-line text string, no shader uniform, shows a textarea in panel (used by the `text` op)
