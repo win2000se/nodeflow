@@ -379,6 +379,7 @@ const P = {
   sel:(key,label,opts,def)=>({key,label,type:'select',opts,def:def||0}),
   bool:(key,label,def)=>({key,label,type:'bool',def:def?1:0}),
   file:(key,label)=>({key,label,type:'file',def:''}),
+  text:(key,label,def)=>({key,label,type:'text',def:def||''}),
 };
 
 const OPS = {
@@ -900,6 +901,38 @@ vec4 render(vec2 uv){
       return vec4(clamp(col,0.0,1.0),1.0);
     }` },
 
+  // VHS — analog tape look: tracking jitter, chroma bleed, tape noise, dropouts, scanlines, optional roll.
+  vhs:{ cat:'filt', ins:1, params:[
+      P.f('jitter','tracking jitter',0,1,0.4,0.01), P.f('chroma','chroma bleed',0,1,0.5,0.01),
+      P.f('noise','tape noise',0,1,0.35,0.01), P.f('scan','scanlines',0,1,0.4,0.01),
+      P.f('desat','wash / desat',0,1,0.3,0.01), P.f('roll','vertical roll',0,1,0,0.01),
+      P.f('wobble','edge wobble',0,1,0.25,0.01) ],
+    body:`vec4 render(vec2 uv){
+      float t=uTime;
+      uv.y=fract(uv.y + u_roll*0.015*t);                                  // vertical hold roll
+      float line=floor(uv.y*uRes.y);
+      uv.x += (vnoise(vec2(uv.y*120.0, t*1.7))-0.5)*u_wobble*0.01;        // gentle edge wobble
+      float jl=(hash21(vec2(line, floor(t*16.0)))-0.5);                   // per-line tracking jitter
+      float band=smoothstep(0.55,0.85,sin(uv.y*5.0 - t*1.4)*0.5+0.5);     // travelling tracking band
+      float disp=jl*u_jitter*0.03 + band*u_jitter*0.05*(hash21(vec2(line,floor(t*9.0)))-0.5);
+      vec2 q=vec2(clamp(uv.x+disp,0.0,1.0), uv.y);
+      float ca=u_chroma*0.008;                                            // chroma bleed / mis-registration
+      float r=texture(uTex0, vec2(clamp(q.x+ca,0.0,1.0),q.y)).r;
+      float g=texture(uTex0, q).g;
+      float b=texture(uTex0, vec2(clamp(q.x-ca,0.0,1.0),q.y)).b;
+      vec3 col=vec3(r,g,b);
+      float lum=dot(col,vec3(0.299,0.587,0.114));
+      col=mix(col, vec3(lum)*vec3(1.02,1.0,0.98), u_desat*0.5);           // washed, slightly warm
+      float scan=0.5+0.5*sin(uv.y*uRes.y*3.14159265);
+      col*=1.0 - u_scan*0.3*scan;
+      float nz=hash21(uv*uRes.xy*0.7 + t*73.0);
+      col += (nz-0.5)*u_noise*0.3;                                        // grain
+      float drop=step(0.9975, hash21(vec2(floor(t*10.0), line)));         // occasional dropout streak
+      col=mix(col, vec3(0.85,0.85,0.8), drop*u_noise*0.9);
+      vec2 d=uv-0.5; col*=mix(1.0, smoothstep(0.95,0.35,length(d)), 0.35);
+      return vec4(clamp(col,0.0,1.0),1.0);
+    }` },
+
   halftone:{ cat:'filt', ins:1, params:[
       P.sel('shape','dot shape',['dot','square','diamond','line'],0),
       P.f('scale','screen scale',6,140,48,1), P.f('angle','angle',-3.14159,3.14159,0.4),
@@ -1287,6 +1320,37 @@ vec4 render(vec2 uv){
       P.f('bright','brightness',0,2,1,0.01), P.f('sat','saturation',0,2,1,0.01) ],
     body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
 
+  // TEXT — canvas-drawn text → texture, so every downstream effect (warp, glitch, feedback…) acts on it.
+  text:{ cat:'gen', ins:0, canvas:true, params:[
+      P.text('content','text','NODEFLOW'),
+      P.sel('font','font',['mono','sans','serif','impact','courier','georgia'],1),
+      P.f('size','size %',2,45,15,0.5),
+      P.col('color','color','#ffffffff'), P.col('bg','background','#00000000'),
+      P.sel('align','align',['center','left','right'],0),
+      P.sel('style','style',['flat','outline','neon','3d extrude'],0),
+      P.f('depth','3d depth',0,28,8,0.5),
+      P.sel('motion','motion',['static','scroll ←','scroll ↑','wave','typewriter','pulse'],0),
+      P.f('speed','motion speed',0,3,1,0.01) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
+  // CODE RAIN — Matrix-style glitch text: scrolling columns of random glyphs that flip through characters.
+  coderain:{ cat:'gen', ins:0, canvas:true, params:[
+      P.sel('charset','glyphs',['katakana','binary','hex','code','digits','math'],0),
+      P.f('columns','density',12,150,52,1), P.f('speed','fall speed',0.05,3,1,0.01),
+      P.col('color','color','#3dff7eff'), P.col('bg','background','#020403ff'),
+      P.f('trail','trail length',0.6,0.99,0.92,0.005), P.f('glow','head glow',0,1,0.7,0.01) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
+  // DETECT HUD — sci-fi feature-tracking overlay: target boxes with corner brackets, link lines and
+  // equation/coordinate labels (procedural, transparent bg). Composite it over a video to "scan" it.
+  hud:{ cat:'gen', ins:0, canvas:true, params:[
+      P.f('boxes','targets',1,10,5,1), P.f('speed','scan speed',0,3,1,0.01),
+      P.col('color','color','#3ad6c0ff'),
+      P.sel('label','labels',['coords','equations','binary','ids'],1),
+      P.f('lines','link lines',0,1,1,0.01), P.f('jitter','lock jitter',0,1,0.45,0.01),
+      P.f('size','box size',0.04,0.3,0.13,0.005) ],
+    body:`vec4 render(vec2 uv){ return texture(uTex0,uv); }` },
+
   // port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background behind it
   rise:{ cat:'comp', ins:2, params:[
       P.sel('dir','throw dir',['forward','back','left','right'],0),
@@ -1336,7 +1400,7 @@ vec4 render(vec2 uv){
 // build a program + uniform map for each op
 function uniformDeclFor(p){
   if(p.type==='color') return 'uniform vec4 u_'+p.key+';';
-  if(p.type==='file') return '';   // no shader uniform for file params
+  if(p.type==='file'||p.type==='text') return '';   // no shader uniform for file/text params
   return 'uniform float u_'+p.key+';';
 }
 const opGL = {}; // name -> {prog, aPos, loc:{}, paramLoc:{}}
@@ -1363,6 +1427,8 @@ function hexToRGBA(h){
   return [ (n>>>24&255)/255, (n>>>16&255)/255, (n>>>8&255)/255, (n&255)/255 ];
 }
 function rgbaToHex(a){ return '#'+a.slice(0,3).map(x=>('0'+Math.round(x*255).toString(16)).slice(-2)).join(''); }
+function cssRGBA(h){ const c=hexToRGBA(h); return 'rgba('+Math.round(c[0]*255)+','+Math.round(c[1]*255)+','+Math.round(c[2]*255)+','+c[3].toFixed(3)+')'; }
+function lightenHex(h,amt){ const c=hexToRGBA(h); const m=x=>Math.round(Math.min(1,x+(1-x)*amt)*255); return 'rgba('+m(c[0])+','+m(c[1])+','+m(c[2])+',1)'; }
 
 // black 1x1 fallback texture
 const blackTex = gl.createTexture();
@@ -1694,6 +1760,133 @@ function runSlime(n,ps,ctx,w,h,pts,P){
   ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; ctx.imageSmoothingEnabled=true;
   ctx.drawImage(S.scratch,0,0,w,h);
 }
+
+// ---- generic 2D-canvas ops (text, code rain, detect HUD) → texture ----
+function run2D(n){
+  if(!n._c2 || n._c2.width!==RW || n._c2.height!==RH){
+    n._c2=document.createElement('canvas'); n._c2.width=RW; n._c2.height=RH;
+    n._cx=n._c2.getContext('2d'); n._rain=null; n._hud=null;
+  }
+  const ctx=n._cx;
+  if(n.op==='text') drawTextOp(n,ctx);
+  else if(n.op==='coderain') drawCodeRain(n,ctx);
+  else if(n.op==='hud') drawHUD(n,ctx);
+  gl.bindTexture(gl.TEXTURE_2D, n._t.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE, n._c2);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
+
+const TEXT_FONTS=['monospace','sans-serif','serif','Impact, Charcoal, sans-serif','"Courier New", monospace','Georgia, serif'];
+function drawTextOp(n,ctx){
+  const W=RW,H=RH;
+  ctx.clearRect(0,0,W,H);
+  const bg=n.params.bg||'#00000000', bgc=hexToRGBA(bg);
+  if(bgc[3]>0.001){ ctx.fillStyle=cssRGBA(bg); ctx.fillRect(0,0,W,H); }
+  const fam=TEXT_FONTS[Math.round(pval(n,'font'))]||'monospace';
+  const px=Math.max(4, pval(n,'size')/100*H);
+  ctx.font='bold '+px+'px '+fam; ctx.textBaseline='middle';
+  const align=Math.round(pval(n,'align')); ctx.textAlign=['center','left','right'][align];
+  const css=cssRGBA(n.params.color||'#ffffffff');
+  const style=Math.round(pval(n,'style')), depth=pval(n,'depth');
+  const motion=Math.round(pval(n,'motion')), speed=pval(n,'speed');
+  let content=n.params.content||'';
+  if(motion===4){ const cnt=Math.floor(time*speed*7)%(content.length+10); content=content.slice(0,Math.min(content.length,cnt)); }
+  const lines=content.split('\n'); const lh=px*1.25;
+  const baseX = align===0?W/2 : align===1?W*0.05 : W*0.95;
+  let baseY = H/2 - (lines.length-1)*lh/2;
+  if(motion===2) baseY = H+px - ((time*speed*70)%(H+lines.length*lh+px*2));   // scroll up
+  if(motion===5){ const s=1.0+0.06*Math.sin(time*speed*4.0); ctx.save(); ctx.translate(W/2,H/2); ctx.scale(s,s); ctx.translate(-W/2,-H/2); }
+  function paint(str,x,y){
+    if(style===3){ for(let i=Math.round(depth);i>=1;i--){ ctx.fillStyle='rgba(0,0,0,0.82)'; ctx.fillText(str,x+i*0.55,y+i*0.55); } ctx.fillStyle=css; ctx.fillText(str,x,y); return; }
+    if(style===2){ ctx.save(); ctx.shadowColor=css; ctx.shadowBlur=px*0.5; ctx.fillStyle=css; ctx.fillText(str,x,y); ctx.fillText(str,x,y); ctx.restore(); return; }
+    if(style===1){ ctx.lineWidth=Math.max(1.2,px*0.07); ctx.strokeStyle=css; ctx.strokeText(str,x,y); return; }
+    ctx.fillStyle=css; ctx.fillText(str,x,y);
+  }
+  lines.forEach((ln,li)=>{
+    const y=baseY+li*lh;
+    if(motion===1){ const a=ctx.textAlign; ctx.textAlign='left'; const tw=ctx.measureText(ln).width;
+      paint(ln, W-((time*speed*130)%(tw+W+px)), y); ctx.textAlign=a; }
+    else if(motion===3){ const a=ctx.textAlign; ctx.textAlign='left';
+      let cx = align===0?W/2-ctx.measureText(ln).width/2 : (align===1?W*0.05:W*0.95-ctx.measureText(ln).width);
+      for(let ci=0;ci<ln.length;ci++){ const ch=ln[ci]; paint(ch, cx, y+Math.sin(time*speed*3.0+ci*0.5)*px*0.3); cx+=ctx.measureText(ch).width; }
+      ctx.textAlign=a; }
+    else paint(ln, baseX, y);
+  });
+  if(motion===5) ctx.restore();
+}
+
+function rainCharset(i){
+  const sets=['アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789',
+    '01','0123456789ABCDEF','{}[]()<>=+-*/;:|&%$#@!?_01abcdefghijklmnopqrstuvwxyz','0123456789','01∑∫∂√πΔΩ∞≈≠≤≥±×÷λμσ='];
+  return sets[i]||sets[0];
+}
+function drawCodeRain(n,ctx){
+  const W=RW,H=RH; const cols=Math.max(8,Math.round(pval(n,'columns')));
+  const colW=W/cols, fpx=colW*1.15;
+  const bg=hexToRGBA(n.params.bg||'#020403ff');
+  if(!n._rain || n._rain.cols!==cols || n._rain.w!==W){
+    ctx.fillStyle=cssRGBA(n.params.bg||'#020403ff'); ctx.fillRect(0,0,W,H);
+    const drops=[]; for(let i=0;i<cols;i++) drops.push(Math.random()*-(H/fpx));
+    n._rain={cols,w:W,drops};
+  }
+  const trail=pval(n,'trail');
+  ctx.fillStyle='rgba('+Math.round(bg[0]*255)+','+Math.round(bg[1]*255)+','+Math.round(bg[2]*255)+','+(1-trail).toFixed(3)+')';
+  ctx.fillRect(0,0,W,H);
+  ctx.font=fpx+'px monospace'; ctx.textBaseline='top';
+  const set=rainCharset(Math.round(pval(n,'charset')));
+  const head=lightenHex(n.params.color||'#3dff7eff',0.65), css=cssRGBA(n.params.color||'#3dff7eff');
+  const glow=pval(n,'glow'), speed=pval(n,'speed');
+  const step=Math.max(0.12, speed*Math.min(3,simDt*60)*0.7);
+  if(glow>0.01){ ctx.shadowColor=css; ctx.shadowBlur=fpx*glow*0.8; }
+  for(let i=0;i<cols;i++){
+    const ch=set[Math.floor(Math.random()*set.length)];
+    const x=i*colW, y=n._rain.drops[i]*fpx;
+    ctx.fillStyle=head; ctx.fillText(ch,x,y);
+    n._rain.drops[i]+=step;
+    if(y>H && Math.random()>0.975) n._rain.drops[i]=Math.random()*-5;
+  }
+  ctx.shadowBlur=0;
+}
+
+function drawBracketBox(ctx,x,y,w,h,c){
+  ctx.beginPath();
+  ctx.moveTo(x,y+c); ctx.lineTo(x,y); ctx.lineTo(x+c,y);
+  ctx.moveTo(x+w-c,y); ctx.lineTo(x+w,y); ctx.lineTo(x+w,y+c);
+  ctx.moveTo(x+w,y+h-c); ctx.lineTo(x+w,y+h); ctx.lineTo(x+w-c,y+h);
+  ctx.moveTo(x+c,y+h); ctx.lineTo(x,y+h); ctx.lineTo(x,y+h-c);
+  ctx.stroke();
+}
+function hudLabel(mode,i,fx,fy,seed,t){
+  if(mode===0) return 'X:'+(fx*100).toFixed(1)+' Y:'+(fy*100).toFixed(1);
+  if(mode===1){ const eqs=['ρ=mv','E=mc²','Σx²','∇·F','θ='+((seed)%6.28).toFixed(2),'λ='+(0.3+fx).toFixed(2),'Δt='+((t)%9).toFixed(2)]; return eqs[(i+Math.floor(t))%eqs.length]; }
+  if(mode===2){ let s=''; for(let k=0;k<8;k++) s+=((Math.floor(seed*1000+t*3)+k)%2); return s; }
+  return 'ID_'+(1000+i*37+Math.floor(seed*100));
+}
+function drawHUD(n,ctx){
+  const W=RW,H=RH; ctx.clearRect(0,0,W,H);
+  const nb=Math.max(1,Math.round(pval(n,'boxes'))), speed=pval(n,'speed');
+  const colHex=n.params.color||'#3ad6c0ff';
+  const css=cssRGBA(colHex), faint=cssRGBA(colHex.slice(0,7)+'55');
+  const labelMode=Math.round(pval(n,'label')), linkAmt=pval(n,'lines'), jitter=pval(n,'jitter'), boxSz=pval(n,'size');
+  ctx.lineWidth=Math.max(1,W*0.0014); ctx.font=Math.round(H*0.022)+'px monospace'; ctx.textBaseline='top';
+  if(!n._hud || n._hud.nb!==nb){ const tg=[]; for(let i=0;i<nb;i++) tg.push({seed:Math.random()*1000}); n._hud={nb,tg}; }
+  const t=time*speed; const pts=[];
+  n._hud.tg.forEach((g,i)=>{
+    const cx=(0.5+0.40*Math.sin(t*0.3+g.seed)+0.06*Math.sin(t*2.1+g.seed*1.7))*W;
+    const cy=(0.5+0.38*Math.cos(t*0.27+g.seed*1.3)+0.06*Math.cos(t*1.9+g.seed))*H;
+    const x=cx+(Math.random()-0.5)*jitter*W*0.012, y=cy+(Math.random()-0.5)*jitter*H*0.012;
+    const bw=boxSz*W*(0.7+0.5*Math.sin(t+g.seed)), bh=bw*(0.78+0.3*Math.sin(t*1.3+g.seed));
+    pts.push({x,y});
+    ctx.strokeStyle=css; drawBracketBox(ctx,x-bw/2,y-bh/2,bw,bh,Math.min(bw,bh)*0.28);
+    ctx.strokeStyle=faint; ctx.beginPath(); ctx.moveTo(x-7,y); ctx.lineTo(x+7,y); ctx.moveTo(x,y-7); ctx.lineTo(x,y+7); ctx.stroke();
+    ctx.fillStyle=css; ctx.fillText(hudLabel(labelMode,i,x/W,y/H,g.seed,t), x-bw/2, y+bh/2+4);
+  });
+  if(linkAmt>0.01 && pts.length>1){ ctx.strokeStyle=faint; ctx.beginPath();
+    for(let i=0;i<pts.length;i++){ const a=pts[i],b=pts[(i+1)%pts.length]; ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); } ctx.stroke(); }
+  const sy=(0.5+0.5*Math.sin(t*0.8))*H; ctx.strokeStyle=faint; ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(W,sy); ctx.stroke();
+}
+
 function runCanvasOp(n){
   syncParticles(n);
   const ps=n._ps, ctx=ps.ctx, w=RW, h=RH, pts=ps.pts;
@@ -2011,7 +2204,7 @@ function renderGraph(){
   }
   for(const n of order){
     const op=OPS[n.op];
-    if(op.canvas){ runCanvasOp(n); n._outTex=n._t.tex; continue; }
+    if(op.canvas){ if(n.op==='particles') runCanvasOp(n); else run2D(n); n._outTex=n._t.tex; continue; }
     if(op.media){ runMediaOp(n); n._outTex=n._t.tex; continue; }
     if(op.timeecho){ runTimeEcho(n); n._outTex=n._t.tex; continue; }
     if(op.cam){ const f=(pval(n,'facing')<0.5)?'user':'environment'; if(camState.ready && camState.facing!==f && !camState.requesting) ensureCamera(f); }
@@ -2058,7 +2251,7 @@ function renderGraph(){
 
 //----------------------------------------------------------------- display names
 const NAME={constant:'Constant',ramp:'Ramp',noise:'Noise',shape:'Shape',voronoi:'Voronoi',raymarch:'Raymarch',shape3d:'Primitive 3D',lattice3d:'Lattice 3D',particles:'Particles',shapegrid:'Shape Grid',truchet:'Truchet',plasma:'Plasma',metaballs:'Metaballs',interference:'Interference',julia:'Julia',chladni:'Chladni',life:'Life',transform:'Transform',
-  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',
+  level:'Level',hsv:'HSV',blur:'Blur',mirror:'Kaleido',fractal:'Fractal Fold',polar:'Polar',pixelate:'Pixelate',posterize:'Posterize',glitch:'Glitch',contour:'Contour',edge:'Edge Detect',crt:'CRT Lens',halftone:'Halftone',warp:'Domain Warp',palette:'Palette',bloom:'Bloom',echo:'Echo',sharpen:'Sharpen',lens:'Lens',composite:'Composite',displace:'Displace',modulate:'Modulate',tonemap:'Tone Map',colorama:'Colorama',thresh:'Threshold',camera:'Camera',media:'Media',rise:'Rise',timeecho:'Time Echo',text:'Text',coderain:'Code Rain',hud:'Detect HUD',vhs:'VHS',
   feedback:'Feedback',flow:'Flow',reaction:'Reaction-Diff',output:'Output'};
 const CATLABEL={gen:'Generators',filt:'Filters',comp:'Composite',fb:'Feedback',out:'Output'};
 
@@ -2265,6 +2458,12 @@ function renderPanel(){
         wrap.appendChild(pickBtn); }
       if(!LIB.on){ const note=el('div'); note.style.cssText='font-size:10px;color:#7c8593'; note.textContent='Needs server connection'; wrap.appendChild(note); }
       row.append(lab,wrap);
+    } else if(p.type==='text'){
+      const lab=el('label'); lab.innerHTML='<span>'+p.label+'</span>';
+      const ta=el('textarea'); ta.value=n.params[p.key]||''; ta.rows=2; ta.spellcheck=false;
+      ta.style.cssText='width:100%;margin-top:3px;background:#0e1016;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px;font-family:var(--mono);font-size:12px;resize:vertical';
+      ta.oninput=()=>{ n.params[p.key]=ta.value; dirty=true; };
+      row.append(lab,ta);
     }
     pBody.append(row);
   });
@@ -3095,7 +3294,7 @@ function opAllowed(op){ if(GEN.exclude && GEN.exclude[op]) return false; return 
 function rmk(op){ const n=addNode(op,40,40); randParams(op,n); return n; }
 function rlink(a,b,port){ conns.push({from:a.id,to:b.id,port:port||0}); }
 // weight generator choice toward structured/detailed sources; constant=0 (never a random source)
-const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0};
+const GEN_WEIGHT={shapegrid:3,truchet:3,voronoi:3,shape:2,shape3d:2.4,lattice3d:2.4,metaballs:2,particles:2.4,raymarch:2,julia:2.2,interference:1.8,chladni:2,noise:1.6,plasma:1,ramp:0.4,constant:0,camera:0,media:0,text:0,coderain:0,hud:0};
 function gw(o){ return GEN_WEIGHT[o]==null?1:GEN_WEIGHT[o]; }
 function wpick(list){
   const pool=list.filter(o=>gw(o)>0);

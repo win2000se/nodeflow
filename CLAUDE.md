@@ -35,6 +35,7 @@ bash deploy.sh
 - `canvas:true` — JS/2D canvas driven (particles). Skips GL shader pipeline.
 - `media:true` — uploads image/gif/video as texture each frame. Skips GL shader pipeline. Image elements MUST be appended to DOM for animated GIF/WebP to work.
 - `cam:true` — uses live camera stream as uTex0 before running shader.
+- `timeecho:true` — custom multi-tap delay-line render path (`runTimeEcho`), holds its own ring of FBOs. Skips GL shader pipeline.
 
 ### GLSL helpers available in all shaders
 `hash21`, `hash22`, `vnoise`, `fbm`, `rot2(vec2,float)`, `wrapUV`, `rgb2hsv`, `hsv2rgb`, `blendm`, `sdSphere`, `sdBox`, `sdTorus`, `sdCapsule`, `sdOcta`, `sdCyl`, `smin3`
@@ -71,14 +72,15 @@ Output is widescreen (e.g. 16:9), but `uv` is [0,1]² — so geometry computed i
 - 2-input compositor: **port 0 (top) = content that gets thrown; port 1 (bottom, optional) = background**
 - Directional thrown-arc: content is launched in a chosen direction (forward/back/left/right relative to camera), arcs up, then falls; depth drives perspective size (forward recedes/shrinks, back rushes toward camera/grows)
 - Content alpha is respected — transparent areas show the background through
-- Motion is driven by a single eased `0→1→0` envelope (`0.5-0.5*cos(t*TAU)`) so velocity is zero at the apex AND the loop seam → a floaty rise-and-settle with no hard ceiling bounce and no snap on loop. `steep` shapes buoyant hang at the top (`pow(s, mix(1.4,0.45,steep))`), it is NOT gravity.
-- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (hang/float), xpos/startY (launch point), scale (base size), persp (perspective strength)
+- True projectile trajectory: horizontal TRAVELS linearly across the range (`travel=t-0.5`) while height is a parabola (`4*t*(1-t)`), so it launches, arcs over and descends to a NEW spot — it never retraces, so there's no ceiling-bounce look. Launch/landing sit below `startY` (off-screen), hiding the loop reset. `steep` rounds the apex for a floatier hang (`pow(base, mix(1.0,0.55,steep))`).
+- `throw` is the travel distance/range — change via slider or via the randomiser (randParams has a `rise` case).
+- Params: dir (throw direction), speed, offset (time offset for staggering instances), throw (travel distance), arc (peak height), steep (apex hang), xpos/startY (launch point), scale (base size), persp (perspective strength)
 - Stack multiple Rise nodes to layer several floating images at different timings (use offset param)
 
 ### Time Echo operator (timeecho)
-- Feedback op (1 input, ping-pong) acting as a temporal dilator: leaves a cascade of copies frozen at successively older moments, each shrunk/drifted/spun/hue-shifted. Feed it a moving input (e.g. shape→rise) to get several copies at different points in time and sizes.
-- Params: size (per-copy shrink), decay (how many copies persist), driftx/drifty, spin, hue (tint per copy), cx/cy (focus), blend (lighten/add/over)
-- Continuous cascade (each copy one frame older). For exact N discrete frozen copies a multi-tap delay-line version would be needed — not yet built.
+- True multi-tap temporal dilator with a **custom render path** (`timeecho:true` flag → `runTimeEcho`, NOT a GLSL feedback loop). Keeps a ring (`n._ring`, capacity `TE_RING=8`) of frozen input snapshots taken every `spacing` frames, then composites N of them as discrete copies — each from a distinct past moment, shrunk (`size^k`), offset (`off*k`) and faded (`fade^k`). Feed it a moving input (e.g. shape→rise) for several real copies frozen at different times AND sizes.
+- Implemented via `teProg`/`teBlit` (draws a texture scaled/offset/faded into an FBO). Composited with MAX (lighten, default — best for opaque content like rise output), ADD, or alpha OVER. Ring cleaned up in `removeNode`/`clearGraph`/on resolution change (`teFreeRing`).
+- Params: taps (copies 1-7), spacing (frames between copies), size (size step/copy), fade (fade/copy), offx/offy (offset/copy), blend.
 
 ### VJ deck bank
 - 8 slots, persisted to localStorage
